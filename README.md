@@ -50,6 +50,8 @@ cd laravel-erp-deploy-debian13
 sudo ./install.sh
 ```
 
+Pokud Docker Engine nebo Compose plugin nejsou dostupné, instalátor se je pokusí nainstalovat z oficiálního repozitáře Dockeru. Pokud zdroj APT ještě není nastaven, přidá vlastní `/etc/apt/sources.list.d/docker.sources` a podpisový klíč; existující zdroje ani klíče nepřepisuje. Je vyžadován přístup k internetu.
+
 Instalátor **nepřidá pravidla firewallu**. Pokud porty 80/443 blokuje firewall nebo cloud security group, nastavte je samostatně a vědomě.
 
 Při první instalaci se vytvoří `/opt/laravel-erp` a `/etc/laravel-erp`. Secrets jsou uloženy v `/etc/laravel-erp/secrets.env` s právy `0600`. Existující soubory se nepřepisují. Před prvním spuštěním upravte `/etc/laravel-erp/stack.env` a `secrets.env`.

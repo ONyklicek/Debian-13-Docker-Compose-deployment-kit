@@ -33,9 +33,51 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl git openssl jq rsync restic openssh-client iproute2
 
-if ! command -v docker >/dev/null 2>&1; then
-  die "Docker Engine není nainstalován. Nainstalujte Docker Engine + Compose plugin podle oficiální dokumentace Dockeru a spusťte instalátor znovu. Instalátor záměrně nepřepisuje repozitáře APT ani Docker konfiguraci."
+docker_ready=0
+if command -v docker >/dev/null 2>&1; then
+  if ! docker info >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+    systemctl start docker >/dev/null 2>&1 || true
+  fi
+  if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    docker_ready=1
+  fi
 fi
+
+if [[ "$docker_ready" -eq 0 ]]; then
+  say "Instalace Docker Engine a Compose pluginu z oficiálního repozitáře"
+  install -d -m 0755 /etc/apt/keyrings
+
+  if [[ ! -s /etc/apt/keyrings/docker.asc ]]; then
+    docker_key_tmp="$(mktemp)"
+    if ! curl -fsSL https://download.docker.com/linux/debian/gpg -o "$docker_key_tmp"; then
+      rm -f "$docker_key_tmp"
+      die "Nepodařilo se stáhnout oficiální podpisový klíč Dockeru."
+    fi
+    install -m 0644 "$docker_key_tmp" /etc/apt/keyrings/docker.asc
+    rm -f "$docker_key_tmp"
+  fi
+
+  if ! grep -Rqs --include='*.list' --include='*.sources' 'download.docker.com/linux/debian' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+    docker_source="/etc/apt/sources.list.d/docker.sources"
+    [[ ! -e "$docker_source" ]] || die "$docker_source již existuje; kvůli zachování konfigurace jej instalátor nepřepíše."
+    cat > "$docker_source" <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: $VERSION_CODENAME
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+    chmod 0644 "$docker_source"
+  fi
+
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now docker
+  fi
+fi
+
 docker info >/dev/null 2>&1 || die "Docker daemon neběží nebo k němu nemáte přístup."
 docker compose version >/dev/null 2>&1 || die "Chybí Docker Compose plugin."
 [[ "$(docker compose version --short | sed 's/^v//;s/[^0-9.].*$//')" != "" ]] || die "Nelze ověřit verzi Compose."
