@@ -126,15 +126,17 @@ wait_web_healthy(){
 }
 
 services_up(){
-  local svcs; svcs=$(app_services | tr '\n' ' ')
+  shared_provision
+  local svcs; svcs=$(dedicated_services | tr '\n' ' ')
   [[ -n ${svcs// /} ]] || return 0
   say "Spouštím služby: $svcs"
   # shellcheck disable=SC2086
   dc_app up -d --wait --wait-timeout 300 $svcs || die "Služby nejsou healthy: $svcs"
-  if app_has_service s3; then
-    dc_app exec -T s3 sh -c "echo 's3.bucket.list' | weed shell -master=127.0.0.1:9333 2>/dev/null | grep -qw $(s3_bucket) \
-      || echo 's3.bucket.create -name $(s3_bucket)' | weed shell -master=127.0.0.1:9333 >/dev/null 2>&1" \
-      || warn "Bucket $(s3_bucket) se nepodařilo ověřit/vytvořit."
+  if is_dedicated s3; then
+    local out
+    out=$(dc_app exec -T s3 sh -c "echo 's3.bucket.list' | weed shell -master=127.0.0.1:9333 2>/dev/null | grep -qw $(s3_bucket) \
+      || echo 's3.bucket.create -name $(s3_bucket)' | weed shell -master=127.0.0.1:9333 2>&1")
+    ! grep -qi 'error' <<<"$out" || die "Bucket $(s3_bucket) se nepodařilo vytvořit: $(grep -i error <<<"$out" | head -n1)"
   fi
 }
 
@@ -235,10 +237,10 @@ cmd_deploy(){
   state_save
 
   workers_up
-  if [[ -n $active && ${A[KEEP_PREVIOUS]:-1} == 0 ]]; then dc_app stop "web-$active" >/dev/null; fi
+  if [[ -n $active && $(setting KEEP_PREVIOUS 1) == 0 ]]; then dc_app stop "web-$active" >/dev/null; fi
   prune_images
   ok "Nasazeno: $APP $BUILT_REVISION (slot $target)"
-  [[ -z $active || ${A[KEEP_PREVIOUS]:-1} == 0 ]] || say "Předchozí slot web-$active běží dál pro okamžitý rollback (dkit rollback $APP)."
+  [[ -z $active || $(setting KEEP_PREVIOUS 1) == 0 ]] || say "Předchozí slot web-$active běží dál pro okamžitý rollback (dkit rollback $APP)."
 }
 
 cmd_rollback(){
@@ -277,7 +279,7 @@ cmd_apply(){
   ensure_platform
   services_up
   # shellcheck disable=SC2046
-  dc_app --profile app up -d --no-build --no-deps $(running_procs)
+  dc_app --profile app up -d --no-build --no-deps --remove-orphans $(running_procs)
   wait_web_healthy "${S[ACTIVE_SLOT]}" || die "Aplikace po změně konfigurace neodpovídá."
   render_routes "${S[ACTIVE_SLOT]}"
   wait_route "${S[ACTIVE_SLOT]}" || warn "Ověření přes Traefik selhalo (domény/certifikát?)."

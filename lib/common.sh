@@ -11,6 +11,8 @@ TRAEFIK_CONTAINER=dkit-traefik
 APP_NAME_RE='^[a-z][a-z0-9-]{0,30}$'
 DOMAIN_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 KNOWN_SERVICES="mariadb postgres redis s3"
+SHAREABLE_SERVICES="mariadb postgres s3"
+SERVICES_NETWORK=dkit_services
 
 if [[ -t 2 ]]; then C_B=$'\e[1m' C_R=$'\e[31m' C_Y=$'\e[33m' C_G=$'\e[32m' C_0=$'\e[0m'; else C_B="" C_R="" C_Y="" C_G="" C_0=""; fi
 say(){ printf '%s==>%s %s\n' "$C_B" "$C_0" "$*" >&2; }
@@ -22,8 +24,8 @@ require_root(){ [[ $EUID -eq 0 ]] || die "Spusťte přes sudo/root."; }
 
 # Reads a KEY=VALUE file into the associative array named by $2 without any shell evaluation.
 # Semantics follow Docker env files: optional quotes, ' #' starts a comment in unquoted values.
-cfg_load(){
-  local file=$1 line key val
+cfg_load(){ # cfg_load <file> <assoc-array> [env]  ("env": Docker Compose env_file unescaping)
+  local file=$1 line key val mode=${3:-}
   local -n _cfg=$2
   [[ -r $file ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
@@ -33,6 +35,7 @@ cfg_load(){
     key=${BASH_REMATCH[2]} val=${BASH_REMATCH[3]}
     if [[ $val =~ ^\"(.*)\"[[:space:]]*$ ]]; then
       val=${BASH_REMATCH[1]}; val=${val//\\\"/\"}
+      if [[ $mode == env ]]; then val=${val//\$\$/\$}; val=${val//\\\\/\\}; fi
     elif [[ $val =~ ^\'(.*)\'[[:space:]]*$ ]]; then
       val=${BASH_REMATCH[1]}
     else
@@ -43,19 +46,54 @@ cfg_load(){
   done < "$file"
 }
 
-# Rewrites (or appends) one KEY=VALUE line in a file, atomically.
-cfg_set(){
+# Quotes a value for our own config files (app.env, dkit.env); cfg_load reads it back verbatim.
+cfg_quote(){
+  local v=$1
+  if [[ $v =~ ^[A-Za-z0-9_./:@,+=%-]*$ ]]; then printf '%s' "$v"
+  elif [[ $v != *"'"* ]]; then printf "'%s'" "$v"
+  else printf '"%s"' "${v//\"/\\\"}"; fi
+}
+
+# Quotes a value for a Docker Compose env_file ("env"): single quotes are literal there;
+# inside double quotes compose interprets backslashes and $ interpolation.
+env_quote(){
+  local v=$1
+  if [[ $v =~ ^[A-Za-z0-9_./:@,+=%-]*$ ]]; then printf '%s' "$v"
+  elif [[ $v != *"'"* ]]; then printf "'%s'" "$v"
+  else v=${v//\\/\\\\}; v=${v//\"/\\\"}; v=${v//\$/\$\$}; printf '"%s"' "$v"; fi
+}
+
+# Rewrites (or appends) one KEY=VALUE line in a file atomically, keeping comments and order.
+# The value is written as given; callers quote it with cfg_quote/env_quote.
+cfg_set_raw(){
   local file=$1 key=$2 val=$3 tmp found=0 line
   tmp=$(mktemp "$(dirname "$file")/.cfg.XXXXXX")
   if [[ -f $file ]]; then
     while IFS= read -r line || [[ -n $line ]]; do
-      if [[ $line =~ ^[[:space:]]*${key}= ]]; then printf '%s=%s\n' "$key" "$val"; found=1; else printf '%s\n' "$line"; fi
+      if [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?${key}= ]]; then
+        [[ $found -eq 1 ]] || printf '%s=%s\n' "$key" "$val"
+        found=1
+      else printf '%s\n' "$line"; fi
     done < "$file" > "$tmp"
   fi
   [[ $found -eq 1 ]] || printf '%s=%s\n' "$key" "$val" >> "$tmp"
   chmod --reference="$file" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
   mv -f "$tmp" "$file"
 }
+cfg_set(){ cfg_set_raw "$1" "$2" "$(cfg_quote "$3")"; }
+
+cfg_unset(){
+  local file=$1 key=$2 tmp line
+  [[ -f $file ]] || return 0
+  tmp=$(mktemp "$(dirname "$file")/.cfg.XXXXXX")
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?${key}= ]] || printf '%s\n' "$line"
+  done < "$file" > "$tmp"
+  chmod --reference="$file" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+valid_key(){ [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
 
 declare -gA G=()
 global_load(){
@@ -106,6 +144,19 @@ app_services(){ local s; for s in ${A[SERVICES]//,/ }; do printf '%s\n' "$s"; do
 app_has_service(){ [[ " ${A[SERVICES]//,/ } " == *" $1 "* ]]; }
 app_workers(){ local w; for w in ${A[WORKERS]//,/ }; do printf '%s\n' "$w"; done; }
 
+# Services served by the shared platform instance instead of per-app containers.
+# app.env SHARED_SERVICES (pinned when the app is created) wins; dkit.env is the default.
+shared_list(){ if [[ -v A[SHARED_SERVICES] ]]; then printf '%s' "${A[SHARED_SERVICES]//,/ }"; else printf '%s' "${G[SHARED_SERVICES]//,/ }"; fi; }
+is_shared(){ app_has_service "$1" && [[ " $(shared_list) " == *" $1 "* ]]; }
+is_dedicated(){ app_has_service "$1" && ! is_shared "$1"; }
+app_any_shared(){ local s; for s in $SHAREABLE_SERVICES; do is_shared "$s" && return 0; done; return 1; }
+dedicated_services(){ local s; for s in $(app_services); do is_dedicated "$s" && printf '%s\n' "$s"; done; return 0; }
+# Hostname of a service as seen by the app.
+svc_host(){ if is_shared "$1"; then printf 'dkit-%s' "$1"; else printf '%s' "$1"; fi; }
+
+# Default from dkit.env for per-app settings that also exist globally.
+setting(){ printf '%s' "${A[$1]:-${G[$1]:-${2:-}}}"; }
+
 app_validate(){
   local d s w p v
   [[ -n ${A[DOMAINS]:-} || ${A[PUBLIC]:-1} == 0 ]] || die "$APP: nastavte DOMAINS v app.env (nebo PUBLIC=0)."
@@ -139,6 +190,10 @@ app_validate(){
   [[ -z $v || $v =~ ^[a-z0-9_-]+(:[a-z0-9_-]+)?$ ]] || die "$APP: neplatné MIGRATE_USER."
   v=${A[PERSIST_OWNER]:-}
   [[ -z $v || $v =~ ^[0-9]+(:[0-9]+)?$ ]] || die "$APP: PERSIST_OWNER musí být uid nebo uid:gid."
+  for s in $(shared_list); do [[ " $SHAREABLE_SERVICES " == *" $s "* ]] || die "$APP: službu '$s' nelze sdílet (sdílet lze: $SHAREABLE_SERVICES)."; done
+  for v in "${A[DB_NAME]:-}" "${A[DB_USER]:-}"; do [[ -z $v || $v =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "$APP: DB_NAME/DB_USER: malá písmena, číslice, podtržítko."; done
+  v=${A[S3_BUCKET]:-}
+  [[ -z $v || $v =~ ^[a-z0-9][a-z0-9.-]{2,62}$ ]] || die "$APP: neplatné S3_BUCKET."
   v=${A[S3_DOMAIN]:-}
   [[ -z $v || $v =~ $DOMAIN_RE ]] || die "$APP: neplatné S3_DOMAIN."
   [[ -z $v ]] || app_has_service s3 || die "$APP: S3_DOMAIN vyžaduje službu s3."
@@ -182,7 +237,9 @@ state_save(){
 # docker compose for the platform (Traefik, UI).
 dc_platform(){
   export DKIT_HOSTNAME="${DKIT_HOSTNAME:-$(hostname)}"
-  docker compose -p dkit -f "$DKIT_ROOT/platform/compose.yaml" --env-file "$DKIT_ETC/dkit.env" "$@"
+  local envs=(--env-file "$DKIT_ETC/dkit.env")
+  [[ ! -f $DKIT_ETC/platform.env ]] || envs+=(--env-file "$DKIT_ETC/platform.env")
+  docker compose -p dkit -f "$DKIT_ROOT/platform/compose.yaml" "${envs[@]}" "$@"
 }
 
 # docker compose for the loaded app. Image tags come from state via the environment.
@@ -209,6 +266,21 @@ traefik_serves(){ # traefik_serves <service> <url>
 }
 probe_via_traefik(){ # probe_via_traefik <domain> <path>
   docker exec "$TRAEFIK_CONTAINER" wget -q -T 8 --no-check-certificate --header "Host: $1" -O /dev/null "https://127.0.0.1$2" >/dev/null 2>&1
+}
+
+# Local presets/templates in /etc/dkit override (or extend) the bundled ones.
+preset_dir(){ if [[ -f $DKIT_ETC/presets/$1/app.env ]]; then printf '%s' "$DKIT_ETC/presets/$1"; else printf '%s' "$DKIT_ROOT/presets/$1"; fi; }
+preset_names(){
+  local p
+  for p in "$DKIT_ETC"/presets/*/app.env "$DKIT_ROOT"/presets/*/app.env; do
+    [[ -f $p ]] || continue; p=${p%/app.env}; printf '%s\n' "${p##*/}"
+  done | sort -u
+}
+template_names(){
+  local t
+  for t in "$DKIT_ETC"/templates/*/Dockerfile "$DKIT_ROOT"/templates/*/Dockerfile; do
+    [[ -f $t ]] || continue; t=${t%/Dockerfile}; printf '%s\n' "${t##*/}"
+  done | sort -u
 }
 
 confirm(){ # confirm <question>; honours DKIT_YES=1

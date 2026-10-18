@@ -14,6 +14,7 @@
     <a href="/" {{if eq .Section "apps"}}class="on"{{end}}>Aplikace</a>
     <a href="/apps/new" {{if eq .Section "new"}}class="on"{{end}}>Nová aplikace</a>
     <a href="/jobs" {{if eq .Section "jobs"}}class="on"{{end}}>Úlohy</a>
+    <a href="/settings" {{if eq .Section "settings"}}class="on"{{end}}>Nastavení</a>
   </nav>
   <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Odhlásit</button></form>
 </header>

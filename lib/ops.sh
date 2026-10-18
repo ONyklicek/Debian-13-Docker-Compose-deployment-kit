@@ -40,23 +40,28 @@ db_service(){
 cmd_db(){
   local sub=${1:-}; shift || true
   app_load "${1:?Zadejte aplikaci}"; shift || true
-  local svc tty=(); svc=$(db_service)
-  [[ -t 0 && -t 1 ]] || tty=(-T)
+  local svc tty=(-i); svc=$(db_service)
+  [[ -t 0 && -t 1 ]] && tty=(-it)
+  local db user; db=$(db_name) user=$(db_user)
   case "$sub:$svc" in
-    shell:mariadb) dc_app exec "${tty[@]}" mariadb sh -c 'exec mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' ;;
-    shell:postgres) dc_app exec "${tty[@]}" postgres sh -c 'exec psql -U "$POSTGRES_USER" "$POSTGRES_DB"' ;;
-    dump:mariadb) dc_app exec -T mariadb sh -c 'exec mariadb-dump --single-transaction --routines --events --triggers --hex-blob -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' ;;
-    dump:postgres) dc_app exec -T postgres sh -c 'exec pg_dump --no-owner -U "$POSTGRES_USER" "$POSTGRES_DB"' ;;
+    shell:mariadb) db_exec mariadb "${tty[@]}" -- mariadb -u "$user" "$db" ;;
+    shell:postgres) db_exec postgres "${tty[@]}" -- psql -U "$user" "$db" ;;
+    dump:*) db_dump "$svc" ;;
     import:*)
       [[ ! -t 0 ]] || die "Předejte SQL na stdin: dkit db import $APP < dump.sql"
       confirm "Importovat SQL do databáze '$APP'? Existující data mohou být přepsána." || die "Zrušeno."
-      if [[ $svc == mariadb ]]; then
-        dc_app exec -T mariadb sh -c 'exec mariadb -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"'
-      else
-        dc_app exec -T postgres sh -c 'exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
-      fi ;;
+      if [[ $svc == mariadb ]]; then db_exec mariadb -i -- mariadb -u "$user" "$db"
+      else db_exec postgres -i -- psql -v ON_ERROR_STOP=1 -U "$user" "$db"; fi ;;
     *) die "Použití: dkit db shell|dump|import <aplikace>" ;;
   esac
+}
+
+db_dump(){
+  if [[ $1 == mariadb ]]; then
+    db_exec mariadb -i -- mariadb-dump --single-transaction --routines --events --triggers --hex-blob --no-tablespaces -u "$(db_user)" "$(db_name)"
+  else
+    db_exec postgres -i -- pg_dump --no-owner -U "$(db_user)" "$(db_name)"
+  fi
 }
 
 # Adminer (MariaDB + PostgreSQL) on loopback only, attached to the app's backend network.
@@ -72,14 +77,16 @@ cmd_adminer(){
   esac
   svc=$(db_service)
   [[ $port =~ ^[0-9]+$ ]] || die "Neplatný port."
+  local net="dkit-${APP}_backend" host=$svc
+  if is_shared "$svc"; then net=$SERVICES_NETWORK host="dkit-$svc"; fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   # The backend network is internal (no published ports), so publish via the edge network.
   docker run -d --name "$name" --restart no --network "$EDGE_NETWORK" \
-    -p "127.0.0.1:$port:8080" -e ADMINER_DEFAULT_SERVER="$svc" \
+    -p "127.0.0.1:$port:8080" -e ADMINER_DEFAULT_SERVER="$host" \
     --security-opt no-new-privileges:true "$(g ADMINER_IMAGE adminer:5)" \
     php -S 0.0.0.0:8080 -t /var/www/html >/dev/null  # the image default binds [::] only
-  docker network connect "dkit-${APP}_backend" "$name"
-  ok "Adminer běží na http://127.0.0.1:$port (server: $svc, uživatel: $(db_user))."
+  docker network connect "$net" "$name"
+  ok "Adminer běží na http://127.0.0.1:$port (server: $host, uživatel: $(db_user), databáze: $(db_name))."
   echo "Z pracovní stanice: ssh -L $port:127.0.0.1:$port uživatel@server" >&2
   echo "Heslo: grep PASSWORD $(app_dir "$APP")/services.env    Po použití: dkit adminer $APP stop" >&2
 }
@@ -107,23 +114,37 @@ backup_one(){
   for svc in $(app_services); do
     case $svc in
       mariadb|postgres)
-        [[ $(container_state "$svc") == healthy ]] || { warn "$APP/$svc neběží; dump přeskočen."; continue; }
-        say "$APP: dump $svc"
-        if [[ $svc == mariadb ]]; then
-          dc_app exec -T mariadb sh -c 'exec mariadb-dump --single-transaction --routines --events --triggers --hex-blob -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' | gzip -6 > "$tmp/$svc.sql.gz"
+        if is_shared "$svc"; then
+          [[ $(docker inspect -f '{{.State.Health.Status}}' "dkit-$svc" 2>/dev/null) == healthy ]] || { warn "Sdílená $svc neběží; dump $APP přeskočen."; continue; }
         else
-          dc_app exec -T postgres sh -c 'exec pg_dump --no-owner -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip -6 > "$tmp/$svc.sql.gz"
+          [[ $(container_state "$svc") == healthy ]] || { warn "$APP/$svc neběží; dump přeskočen."; continue; }
         fi
+        say "$APP: dump $svc"
+        db_dump "$svc" | gzip -6 > "$tmp/$svc.sql.gz"
+        [[ ${PIPESTATUS[0]} -eq 0 ]] || die "$APP: dump $svc selhal."
         gzip -t "$tmp/$svc.sql.gz" ;;
     esac
   done
   paths+=("$tmp" "$(app_dir "$APP")")
   for p in ${A[PERSIST]:-}; do paths+=("$(persist_host_dir "${p%%:*}")"); done
-  app_has_service s3 && paths+=("$(app_state_dir "$APP")/s3")
+  is_dedicated s3 && paths+=("$(app_state_dir "$APP")/s3")
   say "$APP: odesílám do $RESTIC_REPOSITORY"
   restic backup --quiet --tag "dkit:$APP" --host "${BACKUP_HOST:-${DKIT_HOSTNAME:-$(hostname)}}" "${paths[@]}"
   restic forget --quiet --tag "dkit:$APP" --group-by tags --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
   ok "$APP: záloha hotova."
+}
+
+# Global config and shared S3 data (per-app databases are dumped by backup_one).
+backup_platform(){
+  local paths=("$DKIT_ETC/dkit.env")
+  [[ ! -f $DKIT_ETC/platform.env ]] || paths+=("$DKIT_ETC/platform.env")
+  [[ ! -d $DKIT_ETC/presets ]] || paths+=("$DKIT_ETC/presets")
+  [[ ! -d $DKIT_ETC/templates ]] || paths+=("$DKIT_ETC/templates")
+  [[ ! -d $DKIT_STATE/shared/s3 ]] || paths+=("$DKIT_STATE/shared/s3")
+  say "platforma: odesílám konfiguraci a sdílené S3"
+  restic backup --quiet --tag dkit:_platform --host "${BACKUP_HOST:-${DKIT_HOSTNAME:-$(hostname)}}" "${paths[@]}" || return 1
+  restic forget --quiet --tag dkit:_platform --group-by tags --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
+  ok "platforma: záloha hotova."
 }
 
 cmd_backup(){
@@ -133,6 +154,7 @@ cmd_backup(){
   local n rc=0
   if [[ ${1:-} == --all || -z ${1:-} ]]; then
     for n in $(app_names); do ( backup_one "$n" ) || { rc=1; warn "Záloha $n selhala."; }; done
+    backup_platform || rc=1
   elif [[ $1 == list ]]; then
     restic snapshots ${2:+--tag "dkit:$2"}
     return

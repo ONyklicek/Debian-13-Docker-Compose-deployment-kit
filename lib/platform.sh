@@ -36,6 +36,13 @@ cmd_platform_up(){
   render_platform_routes
   say "Spouštím Traefik"
   dc_platform up -d --wait traefik || die "Traefik se nespustil (dkit platform logs)."
+  # Apply config changes (image versions etc.) to shared services that are already in use.
+  local svc running=()
+  for svc in mariadb postgres s3; do docker inspect "dkit-$svc" >/dev/null 2>&1 && running+=("shared-$svc"); done
+  if [[ ${#running[@]} -gt 0 ]]; then
+    platform_secrets_ensure
+    dc_platform up -d --wait --wait-timeout 300 "${running[@]}" || die "Sdílené služby se nespustily."
+  fi
   ok "Platforma běží."
 }
 

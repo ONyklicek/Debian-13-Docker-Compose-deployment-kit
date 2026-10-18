@@ -1,0 +1,15 @@
+{{template "head" .}}
+<div class="titlebar"><h1>Preset {{.Data.Name}}</h1>{{if .Data.Local}}<span class="badge ok">vlastní</span>{{else}}<span class="badge warn">výchozí — jen pro čtení</span>{{end}}<a href="/settings">← Nastavení</a></div>
+<p class="hint">Zástupné hodnoty: <code>__APP__ __DOMAIN__ __DOMAINS__ __REPO__ __BRANCH__ __IMAGE__ __HEX32__ __HEX16__ __LARAVEL_KEY__</code>. Každé <code>__HEX32__</code> je nová náhodná hodnota. První řádek komentáře je popis presetu.</p>
+<form method="post" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>app.env <small>nastavení kitu</small><textarea name="app.env" rows="22" spellcheck="false" {{if not .Data.Local}}readonly{{end}}>{{.Data.AppEnv}}</textarea></label>
+  <label>env <small>výchozí proměnné aplikace (volitelné)</small><textarea name="env" rows="10" spellcheck="false" {{if not .Data.Local}}readonly{{end}}>{{.Data.Env}}</textarea></label>
+  {{if .Data.Local}}<button class="primary">Uložit</button>{{end}}
+</form>
+{{if .Data.Local}}
+<form method="post" data-confirm="remove-preset"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="remove"><button>Odstranit preset</button></form>
+{{else}}
+<form method="post"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="create"><input type="hidden" name="from" value="{{.Data.Name}}"><button class="primary">Upravit jako vlastní kopii</button></form>
+{{end}}
+{{template "foot" .}}

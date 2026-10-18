@@ -1,10 +1,34 @@
-// Small progressive enhancements; every page works without JavaScript except live job output.
+// Progressive enhancements; forms work without JavaScript except live job output and adding rows.
 document.addEventListener('DOMContentLoaded', () => {
-  // Configuration tabs
-  document.querySelectorAll('[data-tab]').forEach(btn => btn.addEventListener('click', () => {
-    document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b === btn));
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.id === btn.dataset.tab));
+  // Page tabs (links work without JS too)
+  document.querySelectorAll('.tabs a[data-tab]').forEach(a => a.addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelectorAll('.tabs a[data-tab]').forEach(x => x.classList.toggle('on', x === a));
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.id === a.dataset.tab));
+    history.replaceState(null, '', a.getAttribute('href'));
   }));
+  document.querySelectorAll('[data-subtab]').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-subtab]').forEach(b => b.classList.toggle('on', b === btn));
+    document.querySelectorAll('.subtab').forEach(t => t.classList.toggle('on', t.id === btn.dataset.subtab));
+  }));
+
+  // Editable tables: add a row from the hidden template row, remove rows
+  document.querySelectorAll('[data-add-row]').forEach(btn => btn.addEventListener('click', () => {
+    const table = document.getElementById(btn.dataset.addRow);
+    const row = table.querySelector('tr.template').cloneNode(true);
+    row.hidden = false; row.classList.remove('template');
+    row.querySelectorAll('input').forEach(i => { i.disabled = false; });
+    table.tBodies[0].appendChild(row);
+    row.querySelector('input').focus();
+  }));
+  document.addEventListener('click', e => {
+    if (e.target.matches('[data-remove-row]')) e.target.closest('tr').remove();
+    if (e.target.matches('[data-reveal]')) {
+      const i = e.target.parentElement.querySelector('input');
+      i.type = i.type === 'password' ? 'text' : 'password';
+      e.target.textContent = i.type === 'password' ? 'zobrazit' : 'skrýt';
+    }
+  });
 
   // Confirmation for disruptive actions
   const questions = {
@@ -12,28 +36,49 @@ document.addEventListener('DOMContentLoaded', () => {
     stop: 'Zastavit aplikaci? Web přestane odpovídat.',
     restart: 'Restartovat běžící kontejnery?',
     remove: 'Odregistrovat aplikaci? Kontejnery se zastaví, data zůstanou.',
+    'bulk-deploy': 'Nasadit znovu VŠECHNY aplikace (postupně)?',
+    'bulk-apply': 'Použít konfiguraci u všech aplikací (restart kontejnerů)?',
+    'bulk-backup': 'Spustit zálohu všech aplikací?',
+    'remove-preset': 'Odstranit preset?',
+    'reset-template': 'Zahodit vlastní úpravy šablony?',
   };
   document.querySelectorAll('form[data-confirm]').forEach(f => f.addEventListener('submit', e => {
     const q = questions[f.dataset.confirm];
     if (q && !confirm(q)) e.preventDefault();
   }));
 
+  // Create preset/template: the name is part of the URL
+  const cp = document.getElementById('create-preset');
+  if (cp) cp.addEventListener('submit', () => { cp.action = '/presets/' + encodeURIComponent(cp.elements.name.value); });
+  const ct = document.getElementById('create-template');
+  if (ct) ct.addEventListener('submit', e => { e.preventDefault(); location.href = '/templates/' + encodeURIComponent(ct.elements.name.value); });
+
+  // Dashboard filter
+  const filter = document.getElementById('filter');
+  const stateFilter = document.getElementById('state-filter');
+  if (filter) {
+    const rows = [...document.querySelectorAll('#apps tbody tr')];
+    const apply = () => {
+      const q = filter.value.trim().toLowerCase(), st = stateFilter.value;
+      let shown = 0;
+      rows.forEach(r => {
+        const ok = (!q || r.dataset.search.toLowerCase().includes(q)) && (!st || r.dataset.state === st);
+        r.hidden = !ok; if (ok) shown++;
+      });
+      document.getElementById('no-match').hidden = shown > 0;
+    };
+    filter.addEventListener('input', apply);
+    stateFilter.addEventListener('change', apply);
+  }
+
   // New app form: show fields relevant to the preset
   const preset = document.getElementById('preset');
   if (preset) {
-    const hints = {
-      laravel: 'PHP-FPM + nginx, MariaDB, Redis, scheduler a queue worker, migrace přes artisan.',
-      php: 'Obecné PHP (Symfony, Nette, WordPress…) s nginx + PHP-FPM a MariaDB.',
-      node: 'Node.js aplikace (npm start na portu 3000) s PostgreSQL.',
-      static: 'Statický web nebo SPA, volitelný npm build, servírováno nginx.',
-      dockerfile: 'Libovolný jazyk — použije Dockerfile z repozitáře.',
-      image: 'Hotový image z registru (Gitea, n8n, Uptime Kuma, vlastní image…).',
-    };
     const sync = () => {
       const img = preset.value === 'image';
       document.querySelectorAll('[data-for="git"]').forEach(el => el.hidden = img);
       document.querySelectorAll('[data-for="image"]').forEach(el => el.hidden = !img);
-      document.getElementById('preset-hint').textContent = hints[preset.value] || '';
+      document.getElementById('preset-hint').textContent = preset.selectedOptions[0]?.dataset.hint || '';
     };
     preset.addEventListener('change', sync);
     sync();
@@ -60,9 +105,8 @@ document.addEventListener('DOMContentLoaded', () => {
           log.textContent += text;
           if (atBottom) log.scrollTop = log.scrollHeight;
         }
-        const running = r.headers.get('X-Running') === 'true';
         const exit = r.headers.get('X-Exit');
-        if (running) { setTimeout(poll, 1000); return; }
+        if (r.headers.get('X-Running') === 'true') { setTimeout(poll, 1000); return; }
         state.className = 'badge ' + (exit === '0' ? 'ok' : 'err');
         state.textContent = exit === '0' ? 'OK' : `chyba ${exit}`;
       } catch (e) { setTimeout(poll, 3000); }

@@ -15,43 +15,55 @@ source "$DKIT_ROOT/lib/app.sh"
 source "$DKIT_ROOT/lib/deploy.sh"
 # shellcheck source=../lib/ops.sh
 source "$DKIT_ROOT/lib/ops.sh"
+# shellcheck source=../lib/config.sh
+source "$DKIT_ROOT/lib/config.sh"
+# shellcheck source=../lib/shared.sh
+source "$DKIT_ROOT/lib/shared.sh"
 # shellcheck source=../lib/platform.sh
 source "$DKIT_ROOT/lib/platform.sh"
 
 usage(){
   cat <<'EOF'
-dkit — správa aplikací v Docker Compose (blue/green, Traefik, zálohy)
+dkit — správa libovolného počtu webů v Docker Compose (blue/green, Traefik, zálohy)
 
 Aplikace
-  dkit apps [--json]                        přehled aplikací
+  dkit apps [--json]                          přehled aplikací
   dkit app create <jméno> --preset P --domain D [--repo URL] [--branch B]
-                  [--image IMG] [--services "mariadb redis s3"] [--port N] [--yes]
-                                            presety: laravel php node static dockerfile image
-  dkit app show <app> [--json]              detail a stav kontejnerů
+                  [--image IMG] [--services "mariadb redis s3"] [--port N]
+  dkit app clone <zdroj> <nová> --domain D [--no-env]   nový web podle existujícího
+  dkit app show <app> [--json]                detail a stav kontejnerů
+  dkit app get <app> [KLÍČ|--json]            nastavení (app.env)
+  dkit app set <app> KLÍČ=HODNOTA… [--unset KLÍČ]    změna nastavení (s validací)
   dkit app edit <app> [app.env|env|compose.override.yaml]
-  dkit app check <app>                      validace konfigurace a přegenerování souborů
-  dkit app remove <app> [--purge] [--yes]   odregistrovat (s --purge i smazat data)
+  dkit app check <app>
+  dkit app remove <app> [--purge]             odregistrovat (s --purge i smazat data)
 
-Nasazení
+Rychlé úpravy
+  dkit domain list|add|remove <app> [doména…]
+  dkit env list|set|unset|import <app> [KLÍČ=HODNOTA…] [--show|--json]
+  dkit worker list|add|remove <app> [jméno] [--cmd "…" --port N --path /x --user u]
+  dkit config get|set|edit [KLÍČ=HODNOTA…]   globální nastavení (dkit.env)
+  dkit preset list|create|edit|remove [jméno] [--from preset]   vlastní presety
+  dkit template list|edit|reset [jméno]       vlastní Dockerfile šablony
+
+Nasazení (místo <app> lze použít --all)
   dkit deploy <app> [--ref větev|tag|sha] [--migrate]
-  dkit rollback <app>                       přepnout zpět na předchozí verzi
-  dkit apply <app>                          použít změny env/app.env bez nového buildu
-  dkit start|stop <app>
-  dkit restart <app> [služba]
+  dkit rollback <app>
+  dkit apply <app>                            změny env/app.env bez nového buildu
+  dkit start|stop|restart <app>
 
 Provoz
-  dkit status                               platforma + aplikace
+  dkit status
   dkit logs <app> [služba…] [-f] [--tail N]
-  dkit exec <app> [služba] [-- příkaz…]     (výchozí: aktivní web, sh)
-  dkit db shell|dump|import <app>           databázová konzole / dump na stdout / import ze stdin
-  dkit adminer <app> [start|stop] [port]    Adminer jen na 127.0.0.1 (přes SSH tunel)
-  dkit backup [<app>|--all]                 Restic záloha (DB dump + perzistentní data + S3)
-  dkit backup list [<app>]
+  dkit exec <app> [služba] [-- příkaz…]
+  dkit db shell|dump|import <app>
+  dkit adminer <app> [start|stop] [port]
+  dkit backup [<app>|--all] | dkit backup list [<app>]
 
 Platforma
-  dkit platform up|status|logs|restart      Traefik (80/443, Let's Encrypt)
-  dkit ui start|stop|status|token [--rotate]  webové rozhraní
-  dkit doctor                               kontrola prostředí
+  dkit platform up|status|logs|restart
+  dkit ui start|stop|status|token [--rotate]
+  dkit doctor
 
 Globální přepínače: --yes (bez potvrzování)
 EOF
@@ -74,6 +86,9 @@ main(){
       local sub=${1:-list}; shift || true
       case $sub in
         create|new|add) cmd_app_create "$@" ;;
+        clone|copy) cmd_app_clone "$@" ;;
+        get) cmd_app_get "$@" ;;
+        set) cmd_app_set "$@" ;;
         list|ls) cmd_app_list "$@" ;;
         show|info) cmd_app_show "$@" ;;
         edit) cmd_app_edit "$@" ;;
@@ -81,12 +96,14 @@ main(){
         remove|rm|delete) cmd_app_remove "$@" ;;
         *) die "Neznámý příkaz: app $sub" ;;
       esac ;;
-    deploy) cmd_deploy "$@" ;;
-    rollback) cmd_rollback "$@" ;;
-    apply) cmd_apply "$@" ;;
-    start) cmd_start "$@" ;;
-    stop) cmd_stop "$@" ;;
-    restart) cmd_restart "$@" ;;
+    deploy|rollback|apply|start|stop|restart)
+      if [[ ${1:-} == --all ]]; then shift; cmd_all "cmd_$cmd" "$@"; else "cmd_$cmd" "$@"; fi ;;
+    domain|domains) cmd_domain "$@" ;;
+    env) cmd_env "$@" ;;
+    worker|workers) cmd_worker "$@" ;;
+    config) cmd_config "$@" ;;
+    preset|presets) cmd_preset "$@" ;;
+    template|templates) cmd_template "$@" ;;
     status)
       if traefik_running; then ok "Traefik běží"; else warn "Traefik neběží (dkit platform up)"; fi
       cmd_app_list "$@" ;;

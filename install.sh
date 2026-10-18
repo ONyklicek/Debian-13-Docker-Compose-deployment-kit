@@ -117,9 +117,9 @@ chmod 0755 "$DKIT_ROOT/bin/dkit"
 ln -sfn "$DKIT_ROOT/bin/dkit" /usr/local/bin/dkit
 
 say "Příprava konfigurace a dat (existující soubory se nemění)"
-install -d -m 0700 "$DKIT_ETC" "$DKIT_ETC/apps" "$DKIT_ETC/templates"
+install -d -m 0700 "$DKIT_ETC" "$DKIT_ETC/apps" "$DKIT_ETC/templates" "$DKIT_ETC/presets"
 install -d -m 0751 "$DKIT_STATE"
-install -d -m 0700 "$DKIT_STATE/apps" "$DKIT_STATE/locks" "$DKIT_STATE/jobs"
+install -d -m 0700 "$DKIT_STATE/apps" "$DKIT_STATE/locks" "$DKIT_STATE/jobs" "$DKIT_STATE/shared"
 install -d -m 0755 "$DKIT_STATE/traefik" "$DKIT_STATE/traefik/dynamic"
 
 if [[ ! -e "$DKIT_ETC/dkit.env" ]]; then
@@ -147,7 +147,7 @@ say "Instalace dokončena ($(cat "$DKIT_ROOT/VERSION"))"
 cat <<EOF
 Další kroky:
   1. Nastavte ACME_EMAIL v $DKIT_ETC/dkit.env a spusťte platformu:  dkit platform up
-  2. Přidejte aplikaci, např.:
+  2. Otevřete web UI (dkit ui start) nebo přidejte aplikaci z CLI, např.:
        dkit app create shop --preset laravel --domain shop.firma.cz --repo git@github.com:firma/shop.git
      (presety: laravel, php, node, static, dockerfile, image)
   3. Pro soukromý repozitář vložte deploy key do $DKIT_ETC/apps/<app>/ssh/deploy_key

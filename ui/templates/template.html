@@ -1,0 +1,10 @@
+{{template "head" .}}
+<div class="titlebar"><h1>Šablona {{.Data.Name}}</h1>{{if .Data.Local}}<span class="badge ok">vlastní úprava</span>{{else}}<span class="badge">výchozí</span>{{end}}<a href="/settings">← Nastavení</a></div>
+<p class="hint">Uložením vznikne vlastní verze v /etc/dkit/templates/{{.Data.Name}}/ (má přednost, upgrade kitu ji nepřepíše). Aplikace ji použijí s <code>BUILD={{.Data.Name}}</code> při dalším deployi.</p>
+<form method="post" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <textarea name="content" rows="34" spellcheck="false">{{.Data.Content}}</textarea>
+  <button class="primary">Uložit</button>
+</form>
+{{if .Data.Local}}<form method="post" data-confirm="reset-template"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="reset"><button>Vrátit na výchozí</button></form>{{end}}
+{{template "foot" .}}

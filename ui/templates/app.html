@@ -1,9 +1,23 @@
 {{template "head" .}}
+{{$d := .Data}}{{$cfg := .Data.Config}}
 {{with .Data.App}}
 <div class="titlebar">
   <h1>{{.Name}}</h1>
+  {{if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else}}<span class="badge warn">nenasazeno</span>{{end}}
   {{range .Domains}}<a class="muted" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a>{{end}}
 </div>
+{{end}}
+<div class="tabs" role="tablist">
+  <a href="?tab=overview" data-tab="tab-overview" {{if eq $d.Tab "overview"}}class="on"{{end}}>Přehled</a>
+  <a href="?tab=settings" data-tab="tab-settings" {{if eq $d.Tab "settings"}}class="on"{{end}}>Nastavení</a>
+  <a href="?tab=env" data-tab="tab-env" {{if eq $d.Tab "env"}}class="on"{{end}}>Proměnné</a>
+  <a href="?tab=advanced" data-tab="tab-advanced" {{if eq $d.Tab "advanced"}}class="on"{{end}}>Soubory</a>
+  <a href="?tab=more" data-tab="tab-more" {{if eq $d.Tab "more"}}class="on"{{end}}>Klon a odstranění</a>
+</div>
+
+<!-- Přehled -->
+<div id="tab-overview" class="tab {{if eq $d.Tab "overview"}}on{{end}}">
+{{with $d.App}}
 <div class="grid2">
   <section class="card">
     <h2>Stav</h2>
@@ -12,7 +26,7 @@
       <dt>Nasazeno</dt><dd>{{or .DeployedAt "—"}}</dd>
       <dt>Předchozí</dt><dd><code>{{or .Previous "—"}}</code></dd>
       <dt>Zdroj</dt><dd>{{if eq .Source "image"}}{{.Image}}{{else}}{{.Repo}} ({{.Branch}}) · build {{.Build}}{{end}}</dd>
-      <dt>Služby</dt><dd>{{if .Services}}{{join .Services ", "}}{{else}}—{{end}}</dd>
+      <dt>Služby</dt><dd>{{if .Services}}{{join .Services ", "}}{{if .Shared}} <small>(sdílené: {{join .Shared ", "}})</small>{{end}}{{else}}—{{end}}</dd>
       <dt>Workery</dt><dd>{{if .Workers}}{{join .Workers ", "}}{{else}}—{{end}}</dd>
     </dl>
     <table class="list compact">
@@ -20,7 +34,7 @@
       <tbody>
       {{range .Containers}}
         <tr><td>{{.Service}}</td><td><span class="badge {{if eq .State "running"}}ok{{else}}warn{{end}}">{{.State}}</span> <span class="muted">{{.Status}}</span></td>
-          <td><a href="/apps/{{$.Data.App.Name}}/logs?service={{.Service}}">logy</a></td></tr>
+          <td><a href="/apps/{{$d.App.Name}}/logs?service={{.Service}}">logy</a></td></tr>
       {{else}}<tr><td colspan="3" class="muted">Žádné kontejnery.</td></tr>{{end}}
       </tbody>
     </table>
@@ -36,56 +50,162 @@
     </form>
     <div class="actions">
       {{range $a := (list "rollback" "apply" "restart" "start" "stop" "backup")}}
-      <form method="post" action="/apps/{{$.Data.App.Name}}/action/{{$a}}" data-confirm="{{$a}}">
+      <form method="post" action="/apps/{{$d.App.Name}}/action/{{$a}}" data-confirm="{{$a}}">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <button>{{actionTitle $a}}</button>
       </form>
       {{end}}
     </div>
     <h3>Poslední úlohy</h3>
-    {{template "jobtable" $.Data.Jobs}}
+    {{template "jobtable" $d.Jobs}}
   </section>
 </div>
 {{end}}
+</div>
 
-<section class="card">
-  <h2>Konfigurace</h2>
-  <div class="tabs" role="tablist">
-    <button type="button" data-tab="tab-app" class="on">app.env <small>nastavení kitu</small></button>
-    <button type="button" data-tab="tab-env">env <small>proměnné aplikace</small></button>
-    <button type="button" data-tab="tab-override">compose.override.yaml <small>pokročilé</small></button>
+<!-- Nastavení -->
+<form method="post" action="/apps/{{$d.App.Name}}/settings" id="tab-settings" class="tab {{if eq $d.Tab "settings"}}on{{end}}">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  {{range $d.Groups}}
+  <section class="card">
+    <h2>{{.Title}}</h2>
+    <div class="formgrid">
+    {{range .Fields}}{{$v := index $cfg .Key}}
+      {{if eq .Kind "textarea"}}
+        <label class="wide">{{.Label}}{{if .Help}} <small>{{.Help}}</small>{{end}}
+          <textarea name="{{.Key}}" rows="3" spellcheck="false">{{if eq .Key "DOMAINS"}}{{replace $v "," "\n"}}{{else}}{{range fields $v}}{{.}}
+{{end}}{{end}}</textarea></label>
+      {{else if eq .Kind "check"}}
+        <label class="inline wide"><input type="checkbox" name="{{.Key}}" value="1" {{if eq .Key "PUBLIC"}}{{if ne $v "0"}}checked{{end}}{{else if eq $v "1"}}checked{{end}}> {{.Label}}</label>
+      {{else if eq .Kind "select"}}
+        <label>{{.Label}}{{if .Help}} <small>{{.Help}}</small>{{end}}
+          <select name="{{.Key}}">
+            {{$opts := .Options}}{{if eq .Key "BUILD"}}{{$opts = $d.BuildOptions}}{{end}}
+            {{range $opts}}<option value="{{.}}" {{if eq . $v}}selected{{end}}>{{if eq . ""}}výchozí (globální nastavení){{else if eq . "1"}}ano{{else if eq . "0"}}ne{{else}}{{.}}{{end}}</option>{{end}}
+          </select></label>
+      {{else if eq .Kind "services"}}
+        <fieldset class="wide"><legend>{{.Label}}</legend>
+          {{range .Options}}<label class="inline"><input type="checkbox" name="SERVICES" value="{{.}}" {{if has (fields (replace $v "," " ")) .}}checked{{end}}> {{.}}</label>{{end}}
+          <div class="shared">
+            <span>Sdílet (jedna instance pro všechny weby):</span>
+            {{range $d.Shareable}}<label class="inline"><input type="checkbox" name="SHARED_SERVICES" value="{{.}}" {{if has (fields (index $cfg "SHARED_SERVICES")) .}}checked{{end}}> {{.}}</label>{{end}}
+          </div>
+          <p class="hint">Sdílená služba = každý web v ní má vlastní databázi, uživatele a bucket. Redis je vždy vlastní. Změna u nasazeného webu nepřenáší data — nejdřív zálohujte (dkit db dump) a po změně importujte.</p>
+        </fieldset>
+      {{else}}
+        <label>{{.Label}}{{if .Help}} <small>{{.Help}}</small>{{end}}<input name="{{.Key}}" value="{{$v}}" spellcheck="false"></label>
+      {{end}}
+    {{end}}
+    </div>
+  </section>
+  {{end}}
+  <section class="card">
+    <h2>Workery <small>dlouho běžící procesy z téhož image (fronty, plánovač, websockety…)</small></h2>
+    <div class="tablewrap">
+    <table class="list compact edit" id="workers">
+      <thead><tr><th>Jméno</th><th>Příkaz</th><th>Uživatel</th><th>Port</th><th>Trasa</th><th></th></tr></thead>
+      <tbody>
+      {{range $d.Workers}}
+        <tr><td><input name="worker_name" value="{{.Name}}" pattern="[a-z][a-z0-9]{0,20}"></td><td><input name="worker_cmd" value="{{.Cmd}}"></td>
+          <td><input name="worker_user" value="{{.User}}"></td><td><input name="worker_port" value="{{.Port}}" inputmode="numeric"></td>
+          <td><input name="worker_path" value="{{.Path}}" placeholder="/app"></td><td><button type="button" class="link" data-remove-row>✕</button></td></tr>
+      {{end}}
+      </tbody>
+      <tfoot><tr class="template" hidden><td><input name="worker_name" pattern="[a-z][a-z0-9]{0,20}" placeholder="queue" disabled></td><td><input name="worker_cmd" placeholder="php artisan queue:work" disabled></td>
+        <td><input name="worker_user" placeholder="www-data" disabled></td><td><input name="worker_port" inputmode="numeric" disabled></td>
+        <td><input name="worker_path" placeholder="/app" disabled></td><td><button type="button" class="link" data-remove-row>✕</button></td></tr></tfoot>
+    </table>
+    </div>
+    <button type="button" data-add-row="workers">+ Přidat worker</button>
+    <p class="hint">Port + trasa zpřístupní worker přes doménu aplikace (např. Reverb na /app).</p>
+  </section>
+  <div class="savebar">
+    <button class="primary" name="then" value="">Uložit</button>
+    <button name="then" value="apply">Uložit a použít</button>
+    <span class="muted">Změna zdroje/buildu se projeví při dalším deployi.</span>
   </div>
-  <form method="post" action="/apps/{{.Data.App.Name}}/files/app.env" id="tab-app" class="tab on">
+</form>
+
+<!-- Proměnné -->
+<form method="post" action="/apps/{{$d.App.Name}}/env" id="tab-env" class="tab {{if eq $d.Tab "env"}}on{{end}}">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <section class="card">
+    <h2>Proměnné prostředí</h2>
+    <p class="hint">Připojení k DB, Redisu a S3 (DB_*, DATABASE_URL, REDIS_*, AWS_*…) doplňuje dkit automaticky; zde je lze přepsat.</p>
+    <div class="tablewrap">
+    <table class="list compact edit" id="envtable">
+      <thead><tr><th>Název</th><th>Hodnota</th><th></th></tr></thead>
+      <tbody>
+      {{range $d.Env}}
+        <tr><td><input name="env_key" value="{{.Key}}" spellcheck="false"></td>
+          <td class="secretcell"><input name="env_value" value="{{.Value}}" spellcheck="false" {{if .Secret}}type="password" autocomplete="off"{{end}}>{{if .Secret}}<button type="button" class="link" data-reveal>zobrazit</button>{{end}}</td>
+          <td><button type="button" class="link" data-remove-row>✕</button></td></tr>
+      {{end}}
+      </tbody>
+      <tfoot><tr class="template" hidden><td><input name="env_key" placeholder="NAZEV" spellcheck="false" disabled></td><td><input name="env_value" spellcheck="false" disabled></td><td><button type="button" class="link" data-remove-row>✕</button></td></tr></tfoot>
+    </table>
+    </div>
+    <button type="button" data-add-row="envtable">+ Přidat proměnnou</button>
+  </section>
+  <div class="savebar">
+    <button class="primary" name="then" value="">Uložit</button>
+    <button name="then" value="apply">Uložit a použít</button>
+  </div>
+</form>
+
+<!-- Soubory -->
+<section id="tab-advanced" class="tab card {{if eq $d.Tab "advanced"}}on{{end}}">
+  <h2>Konfigurační soubory</h2>
+  <p class="hint">Přímá úprava pro pokročilé. Neplatná změna se automaticky vrátí.</p>
+  <div class="subtabs">
+    <button type="button" data-subtab="f-app" class="on">app.env</button>
+    <button type="button" data-subtab="f-env">env</button>
+    <button type="button" data-subtab="f-override">compose.override.yaml</button>
+  </div>
+  <form method="post" action="/apps/{{$d.App.Name}}/files/app.env" id="f-app" class="subtab on">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <textarea name="content" spellcheck="false" rows="24">{{index .Data.Files "app.env"}}</textarea>
+    <textarea name="content" spellcheck="false" rows="24">{{index $d.Files "app.env"}}</textarea>
     <button class="primary">Uložit app.env</button>
   </form>
-  <form method="post" action="/apps/{{.Data.App.Name}}/files/env" id="tab-env" class="tab">
+  <form method="post" action="/apps/{{$d.App.Name}}/files/env" id="f-env" class="subtab">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p class="hint">Obsahuje secrets. Připojení k DB/Redis/S3 doplňuje dkit automaticky; zde je lze přepsat.</p>
-    <textarea name="content" spellcheck="false" rows="24">{{index .Data.Files "env"}}</textarea>
+    <textarea name="content" spellcheck="false" rows="24">{{index $d.Files "env"}}</textarea>
     <button class="primary">Uložit env</button>
   </form>
-  <form method="post" action="/apps/{{.Data.App.Name}}/files/compose.override.yaml" id="tab-override" class="tab">
+  <form method="post" action="/apps/{{$d.App.Name}}/files/compose.override.yaml" id="f-override" class="subtab">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p class="hint">Doplňky Docker Compose (další kontejnery, volumes, limity). Sloučí se s vygenerovanou konfigurací.</p>
-    <textarea name="content" spellcheck="false" rows="24">{{index .Data.Files "compose.override.yaml"}}</textarea>
+    <p class="hint">Další kontejnery, volumes nebo limity ve formátu Docker Compose; sloučí se s vygenerovanou konfigurací.</p>
+    <textarea name="content" spellcheck="false" rows="24">{{index $d.Files "compose.override.yaml"}}</textarea>
     <button class="primary">Uložit override</button>
   </form>
 </section>
 
-<section class="card danger">
-  <h2>Odstranění</h2>
-  <form method="post" action="/apps/{{.Data.App.Name}}/action/remove" data-confirm="remove">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p>Zastaví kontejnery a přesune konfiguraci do archivu. Data zůstanou.</p>
-    <button>Odregistrovat</button>
-  </form>
-  <form method="post" action="/apps/{{.Data.App.Name}}/action/purge">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p>Nevratně smaže kontejnery, databáze, soubory i konfiguraci. Pro potvrzení opište jméno aplikace.</p>
-    <input name="confirm" placeholder="{{.Data.App.Name}}" autocomplete="off">
-    <button class="dangerbtn">Smazat včetně dat</button>
-  </form>
-</section>
+<!-- Klon a odstranění -->
+<div id="tab-more" class="tab {{if eq $d.Tab "more"}}on{{end}}">
+  <section class="card">
+    <h2>Nový web podle této aplikace</h2>
+    <form method="post" action="/apps/{{$d.App.Name}}/clone" class="form">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label>Jméno nové aplikace<input name="new_name" required pattern="[a-z][a-z0-9-]{0,30}"></label>
+      <label>Domény <small>čárkou oddělené</small><input name="domains" required></label>
+      <label class="inline"><input type="checkbox" name="with_env" value="1"> Zkopírovat i proměnné prostředí (včetně secrets)</label>
+      <p class="hint">Nová aplikace dostane vlastní databázi, hesla služeb a data.</p>
+      <button class="primary">Klonovat</button>
+    </form>
+  </section>
+  <section class="card danger">
+    <h2>Odstranění</h2>
+    <form method="post" action="/apps/{{$d.App.Name}}/action/remove" data-confirm="remove">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <p>Zastaví kontejnery a přesune konfiguraci do archivu. Data zůstanou.</p>
+      <button>Odregistrovat</button>
+    </form>
+    <form method="post" action="/apps/{{$d.App.Name}}/action/purge">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <p>Nevratně smaže kontejnery, databáze, soubory i konfiguraci. Pro potvrzení opište jméno aplikace.</p>
+      <input name="confirm" placeholder="{{$d.App.Name}}" autocomplete="off">
+      <button class="dangerbtn">Smazat včetně dat</button>
+    </form>
+  </section>
+</div>
 {{template "foot" .}}

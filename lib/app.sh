@@ -1,7 +1,6 @@
 # shellcheck shell=bash
 # App registry: create, list, show, edit, remove.
 
-presets(){ local p; for p in "$DKIT_ROOT"/presets/*/app.env; do p=${p%/app.env}; printf '%s\n' "${p##*/}"; done; }
 
 ask(){ # ask <prompt> <default> -> answer on stdout
   local r
@@ -47,10 +46,10 @@ cmd_app_create(){
   valid_app_name "$C_APP" || die "Neplatné jméno '$C_APP' (malá písmena, číslice, pomlčka; max 31 znaků)."
   ! app_exists "$C_APP" || die "Aplikace '$C_APP' již existuje."
   if [[ -z $preset ]]; then
-    [[ $tty -eq 1 ]] || die "Zadejte --preset ($(presets | tr '\n' ' '))."
-    preset=$(ask "Preset ($(presets | tr '\n' ' '))" "dockerfile")
+    [[ $tty -eq 1 ]] || die "Zadejte --preset ($(preset_names | tr '\n' ' '))."
+    preset=$(ask "Preset ($(preset_names | tr '\n' ' '))" "dockerfile")
   fi
-  [[ -f $DKIT_ROOT/presets/$preset/app.env ]] || die "Neznámý preset '$preset'. Dostupné: $(presets | tr '\n' ' ')"
+  [[ -f "$(preset_dir "$preset")/app.env" ]] || die "Neznámý preset '$preset'. Dostupné: $(preset_names | tr '\n' ' ')"
   [[ -n $domains || $tty -eq 0 ]] || domains=$(ask "Domény (čárkou oddělené)" "")
   domains=${domains// /}
   [[ -n $domains ]] || die "Zadejte alespoň jednu doménu (--domain)."
@@ -66,9 +65,10 @@ cmd_app_create(){
 
   local dir; dir=$(app_dir "$C_APP")
   install -d -m 0700 "$DKIT_ETC/apps" "$dir" "$dir/ssh"
-  preset_expand < "$DKIT_ROOT/presets/$preset/app.env" | atomic_write "$dir/app.env" 0640
-  if [[ -f $DKIT_ROOT/presets/$preset/env ]]; then
-    preset_expand < "$DKIT_ROOT/presets/$preset/env" | atomic_write "$dir/env" 0600
+  local pdir; pdir=$(preset_dir "$preset")
+  preset_expand < "$pdir/app.env" | atomic_write "$dir/app.env" 0640
+  if [[ -f $pdir/env ]]; then
+    preset_expand < "$pdir/env" | atomic_write "$dir/env" 0600
   else
     install -m 0600 /dev/null "$dir/env"
   fi
@@ -87,27 +87,38 @@ Další krok:    dkit deploy $C_APP
 EOF
 }
 
-app_json(){ # JSON summary of the loaded app
-  local containers
-  containers=$(docker ps -a --filter "label=com.docker.compose.project=dkit-$APP" \
-    --format '{{json .}}' 2>/dev/null | jq -sc '[.[] | {service: .Labels | capture("com.docker.compose.service=(?<s>[^,]+)").s, state: .State, status: .Status}]' 2>/dev/null || echo '[]')
+# All dkit containers in one docker call, as {project: [{service,state,status}]}.
+all_containers_json(){
+  docker ps -a --filter label=com.docker.compose.project --format '{{json .}}' 2>/dev/null | jq -sc '
+    map(select(.Labels | test("com.docker.compose.project=dkit-")))
+    | map({p: (.Labels | capture("com.docker.compose.project=(?<p>[^,]+)").p),
+           service: (.Labels | capture("com.docker.compose.service=(?<s>[^,]+)").s), state: .State, status: .Status})
+    | group_by(.p) | map({key: .[0].p, value: map(del(.p))}) | from_entries' 2>/dev/null || echo '{}'
+}
+
+app_json(){ # app_json [containers-json-for-all-apps]
+  local all=${1:-}
+  [[ -n $all ]] || all=$(all_containers_json)
   jq -cn \
     --arg name "$APP" --arg domains "${A[DOMAINS]:-}" --arg source "${A[SOURCE]:-git}" \
     --arg repo "${A[GIT_REPOSITORY]:-}" --arg branch "${A[GIT_BRANCH]:-main}" --arg image "${A[IMAGE]:-}" \
-    --arg build "${A[BUILD]:-dockerfile}" --arg services "${A[SERVICES]:-}" --arg workers "${A[WORKERS]:-}" \
+    --arg build "${A[BUILD]:-dockerfile}" --arg services "${A[SERVICES]:-}" --arg shared "$(for x in $(shared_list); do app_has_service "$x" && printf '%s ' "$x"; done)" \
+    --arg workers "${A[WORKERS]:-}" \
     --arg slot "${S[ACTIVE_SLOT]:-}" --arg rev "${S[REVISION_ACTIVE]:-}" --arg prev "${S[REVISION_PREVIOUS]:-}" \
-    --arg at "${S[DEPLOYED_AT]:-}" --argjson containers "${containers:-[]}" \
+    --arg at "${S[DEPLOYED_AT]:-}" --argjson all "$all" \
     '{name:$name, domains:($domains|split(",")|map(select(.!=""))), source:$source, repo:$repo, branch:$branch,
       image:$image, build:$build, services:($services|split(" ")|map(select(.!=""))),
+      shared:($shared|split(" ")|map(select(.!=""))),
       workers:($workers|split(" ")|map(select(.!=""))), active_slot:$slot, revision:$rev,
-      previous_revision:$prev, deployed_at:$at, containers:$containers}'
+      previous_revision:$prev, deployed_at:$at, containers:($all["dkit-" + $name] // [])}'
 }
 
 cmd_app_list(){
   local json=0 n
   [[ ${1:-} == --json ]] && json=1
   if [[ $json -eq 1 ]]; then
-    { for n in $(app_names); do ( app_load "$n" >/dev/null 2>&1 && app_json ) || jq -cn --arg n "$n" '{name:$n, error:"neplatná konfigurace"}'; done; } | jq -sc .
+    local all; all=$(all_containers_json)
+    { for n in $(app_names); do ( app_load "$n" >/dev/null 2>&1 && app_json "$all" ) || jq -cn --arg n "$n" '{name:$n, error:"neplatná konfigurace"}'; done; } | jq -sc .
     return
   fi
   printf '%-20s %-32s %-7s %-14s %s\n' APLIKACE DOMÉNY SLOT REVIZE NASAZENO
@@ -162,6 +173,7 @@ cmd_app_remove(){
     if [[ $purge -eq 1 ]]; then dc_app --profile app down -v --remove-orphans; else dc_app --profile app down --remove-orphans; fi
   fi
   if [[ $purge -eq 1 ]]; then
+    shared_deprovision
     docker images --format '{{.Repository}}:{{.Tag}}' "dkit/$APP" | xargs -r docker rmi >/dev/null 2>&1 || true
     rm -rf -- "$(app_state_dir "$APP")" "$(app_dir "$APP")"
     ok "Aplikace '$APP' smazána včetně dat."

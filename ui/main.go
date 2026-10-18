@@ -47,7 +47,6 @@ var (
 	refRe     = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
 	jobIDRe   = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}-[0-9a-f]{6}$`)
 	editable  = map[string]os.FileMode{"app.env": 0o640, "env": 0o600, "compose.override.yaml": 0o600}
-	presets   = []string{"laravel", "php", "node", "static", "dockerfile", "image"}
 	services  = []string{"mariadb", "postgres", "redis", "s3"}
 )
 
@@ -244,6 +243,7 @@ type App struct {
 	Image      string      `json:"image"`
 	Build      string      `json:"build"`
 	Services   []string    `json:"services"`
+	Shared     []string    `json:"shared"`
 	Workers    []string    `json:"workers"`
 	ActiveSlot string      `json:"active_slot"`
 	Revision   string      `json:"revision"`
@@ -263,10 +263,16 @@ func (a App) Running() int {
 }
 
 func runDkit(timeout time.Duration, args ...string) ([]byte, error) {
+	return runDkitIn("", timeout, args...)
+}
+
+// runDkitIn runs the CLI with the given stdin (used for values that must not appear in argv).
+func runDkitIn(stdin string, timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, dkitBin, args...)
 	cmd.Env = append(os.Environ(), "DKIT_YES=1", "TERM=dumb")
+	cmd.Stdin = strings.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -314,6 +320,18 @@ var tpl = template.Must(template.New("").Funcs(template.FuncMap{
 	"join":        strings.Join,
 	"list":        func(s ...string) []string { return s },
 	"actionTitle": func(a string) string { return actions[a] },
+	"has": func(list []string, v string) bool {
+		for _, x := range list {
+			if x == v {
+				return true
+			}
+		}
+		return false
+	},
+	"fields":   strings.Fields,
+	"split":    func(s, sep string) []string { return strings.Split(s, sep) },
+	"replace":  strings.ReplaceAll,
+	"contains": strings.Contains,
 	"ago": func(t time.Time) string {
 		d := time.Since(t).Round(time.Second)
 		switch {
@@ -424,7 +442,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleNew(w http.ResponseWriter, r *http.Request) {
-	data := map[string]any{"Presets": presets, "Services": services}
+	data := map[string]any{"Presets": listPresets(), "Services": services}
 	if r.Method == http.MethodGet {
 		render(w, r, "new.html", page{Title: "Nová aplikace", Section: "new", Data: data})
 		return
@@ -480,8 +498,17 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 		b, _ := os.ReadFile(appFile(name, f))
 		files[f] = string(b)
 	}
+	cfg, _ := getJSONMap("app", "get", name, "--json")
+	env, _ := getJSONMap("env", "list", name, "--json")
+	tab := r.URL.Query().Get("tab")
+	if tab == "" {
+		tab = "overview"
+	}
 	render(w, r, "app.html", page{Title: name, Section: "apps", Data: map[string]any{
-		"App": a, "Files": files, "Jobs": jobs.list(name, 10),
+		"App": a, "Files": files, "Jobs": jobs.list(name, 10), "Tab": tab,
+		"Groups": appGroups, "Config": cfg, "BuildOptions": buildOptions(), "Workers": workersOf(cfg),
+		"Env": envVars(env),
+		"Shareable": []string{"mariadb", "postgres", "s3"},
 	}})
 }
 
@@ -499,7 +526,7 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 		content += "\n"
 	}
 	if err := writeAtomic(path, []byte(content), mode); err != nil {
-		redirect(w, r, "/apps/"+name+"?err="+urlq("Uložení selhalo: "+err.Error()))
+		redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Uložení selhalo: "+err.Error()))
 		return
 	}
 	if out, err := runDkit(2*time.Minute, "app", "check", name); err != nil {
@@ -508,10 +535,10 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 		} else {
 			os.Remove(path)
 		}
-		redirect(w, r, "/apps/"+name+"?err="+urlq("Konfigurace neprošla kontrolou, změna vrácena: "+err.Error()+" "+string(out)))
+		redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Konfigurace neprošla kontrolou, změna vrácena: "+err.Error()+" "+string(out)))
 		return
 	}
-	redirect(w, r, "/apps/"+name+"?ok="+urlq(file+" uložen. Projeví se po „Použít konfiguraci“ nebo dalším deployi."))
+	redirect(w, r, "/apps/"+name+"?tab=advanced&ok="+urlq(file+" uložen. Projeví se po „Použít konfiguraci“ nebo dalším deployi."))
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
@@ -578,6 +605,23 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	id, err := jobs.start(name, title+" "+name, args...)
 	if err != nil {
 		redirect(w, r, "/apps/"+name+"?err="+urlq(err.Error()))
+		return
+	}
+	redirect(w, r, "/jobs/"+id)
+}
+
+var bulkActions = map[string]string{"deploy": "Deploy všech aplikací", "apply": "Použít konfiguraci u všech", "backup": "Záloha všeho"}
+
+func handleBulk(w http.ResponseWriter, r *http.Request) {
+	action := r.PathValue("action")
+	title, ok := bulkActions[action]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := jobs.start("", title, action, "--all")
+	if err != nil {
+		redirect(w, r, "/?err="+urlq(err.Error()))
 		return
 	}
 	redirect(w, r, "/jobs/"+id)
@@ -661,6 +705,16 @@ func main() {
 	mux.HandleFunc("GET /apps/{name}/logs", withAuth(handleLogs))
 	mux.HandleFunc("POST /apps/{name}/files/{file}", withAuth(handleSave))
 	mux.HandleFunc("POST /apps/{name}/action/{action}", withAuth(handleAction))
+	mux.HandleFunc("POST /apps/{name}/settings", withAuth(handleAppSettings))
+	mux.HandleFunc("POST /apps/{name}/env", withAuth(handleAppEnv))
+	mux.HandleFunc("POST /apps/{name}/clone", withAuth(handleClone))
+	mux.HandleFunc("POST /bulk/{action}", withAuth(handleBulk))
+	mux.HandleFunc("GET /settings", withAuth(handleSettings))
+	mux.HandleFunc("POST /settings", withAuth(handleSettings))
+	mux.HandleFunc("GET /presets/{name}", withAuth(handlePreset))
+	mux.HandleFunc("POST /presets/{name}", withAuth(handlePreset))
+	mux.HandleFunc("GET /templates/{name}", withAuth(handleTemplate))
+	mux.HandleFunc("POST /templates/{name}", withAuth(handleTemplate))
 	mux.HandleFunc("GET /jobs", withAuth(handleJobs))
 	mux.HandleFunc("GET /jobs/{id}", withAuth(handleJob))
 	mux.HandleFunc("GET /jobs/{id}/raw", withAuth(handleJobRaw))

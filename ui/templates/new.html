@@ -6,7 +6,7 @@
     <input name="name" required pattern="[a-z][a-z0-9-]{0,30}" placeholder="shop"></label>
   <label>Preset
     <select name="preset" id="preset">
-      {{range .Data.Presets}}<option value="{{.}}">{{.}}</option>{{end}}
+      {{range .Data.Presets}}<option value="{{.Name}}" data-hint="{{.Description}}">{{.Name}}{{if .Local}} (vlastní){{end}}</option>{{end}}
     </select>
   </label>
   <p class="hint" id="preset-hint"></p>
@@ -26,7 +26,7 @@
     <div class="checks" id="services">
       {{range .Data.Services}}<label class="inline"><input type="checkbox" name="services" value="{{.}}"> {{.}}</label>{{end}}
     </div>
-    <p class="hint">mariadb / postgres = databáze, redis = cache a fronty, s3 = objektové úložiště (SeaweedFS). Každá aplikace dostane vlastní kontejnery a hesla.</p>
+    <p class="hint">mariadb / postgres = databáze, redis = cache a fronty, s3 = objektové úložiště (SeaweedFS). Zda jsou služby vlastní, nebo sdílené, určuje <a href="/settings">globální nastavení</a>; u aplikace jde změnit později.</p>
   </fieldset>
   <button class="primary">Vytvořit</button>
 </form>

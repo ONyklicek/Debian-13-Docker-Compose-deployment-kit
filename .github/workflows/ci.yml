@@ -29,4 +29,4 @@ jobs:
       - name: Compose
         run: |
           printf 'ACME_EMAIL=ci@example.org\n' > /tmp/dkit.env
-          docker compose -p dkit -f platform/compose.yaml --env-file /tmp/dkit.env --profile ui config -q
+          docker compose -p dkit -f platform/compose.yaml --env-file /tmp/dkit.env --profile ui --profile shared config -q

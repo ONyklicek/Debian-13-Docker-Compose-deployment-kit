@@ -1,6 +1,8 @@
 # dkit — Debian 13 / Docker Compose deployment kit
 
-Univerzální nástroj pro provoz webových aplikací na jednom serveru s Debianem 13: **CLI `dkit`**, **webové rozhraní**, blue/green nasazení bez výpadku, automatické HTTPS přes Traefik a Let's Encrypt, **kontejnery pro databáze, Redis a S3 úložiště** a šifrované zálohy přes Restic.
+Univerzální nástroj pro provoz **libovolného počtu webů** na jednom serveru s Debianem 13: **CLI `dkit`**, **webové rozhraní**, blue/green nasazení bez výpadku, automatické HTTPS přes Traefik a Let's Encrypt, **kontejnery pro databáze, Redis a S3 úložiště** (vlastní pro každý web, nebo sdílené) a šifrované zálohy přes Restic.
+
+Vše je nastavitelné bez ruční editace souborů — formuláři ve webovém rozhraní nebo krátkými příkazy (`dkit app set`, `dkit env set`, `dkit domain add`, `dkit worker add`, `dkit config set`). Každá změna se zkontroluje a neplatná se automaticky vrátí. Vlastní presety a šablony buildů upgrade kitu nepřepíše.
 
 Nasadit jde cokoli, co běží v Dockeru: Laravel, Symfony nebo čisté PHP, Node.js (Express, Next.js, Nuxt), statický web nebo SPA, aplikaci s vlastním `Dockerfile` v libovolném jazyce, nebo hotový image z registru (Gitea, n8n, Uptime Kuma, vlastní image z GHCR).
 
@@ -27,7 +29,7 @@ Nasadit jde cokoli, co běží v Dockeru: Laravel, Symfony nebo čisté PHP, Nod
 |---|---|
 | `bin/dkit` | CLI (bash): správa aplikací, deploy, rollback, logy, DB, zálohy, platforma |
 | `ui/` | Webové rozhraní (Go, bez externích závislostí), běží jako kontejner `dkit-ui` |
-| `platform/compose.yaml` | Sdílený Traefik (80/443, Let's Encrypt) a web UI |
+| `platform/compose.yaml` | Traefik (80/443, Let's Encrypt), web UI a volitelné sdílené MariaDB/PostgreSQL/S3 |
 | `presets/` | Výchozí konfigurace: `laravel`, `php`, `node`, `static`, `dockerfile`, `image` |
 | `templates/` | Dockerfile šablony pro repozitáře bez vlastního Dockerfile: `php`, `node`, `static` |
 | `install.sh` | Instalátor pro Debian 13 (Docker z oficiálního repozitáře, nástroje, adresáře) |
@@ -37,10 +39,13 @@ Rozložení na serveru:
 | Cesta | Obsah | Při upgradu |
 |---|---|---|
 | `/opt/dkit` | kód kitu | nahrazen |
-| `/etc/dkit/dkit.env` | globální nastavení (ACME e-mail, image služeb, UI) | nikdy se nepřepisuje |
+| `/etc/dkit/dkit.env` | globální nastavení (ACME e-mail, image služeb, sdílení, UI) | nikdy se nepřepisuje |
+| `/etc/dkit/platform.env` | hesla sdílených služeb (0600) | nikdy se nepřepisuje |
+| `/etc/dkit/presets/<preset>/` | vlastní presety (mají přednost před výchozími) | nikdy se nepřepisuje |
 | `/etc/dkit/apps/<app>/` | `app.env` (nastavení kitu), `env` (proměnné aplikace, 0600), `services.env` (hesla služeb, 0600), `ssh/` (deploy key), volitelně `compose.override.yaml` | nikdy se nepřepisuje |
 | `/etc/dkit/templates/<šablona>/Dockerfile` | lokální úprava šablony (má přednost) | nikdy se nepřepisuje |
-| `/var/lib/dkit/apps/<app>/` | vygenerovaný `compose.yaml`, `state.env`, perzistentní data `data/<jméno>/`, S3 data `s3/` | zachováno |
+| `/var/lib/dkit/apps/<app>/` | vygenerovaný `compose.yaml`, `state.env`, `network.env` (subnet), perzistentní data `data/<jméno>/`, S3 data `s3/` | zachováno |
+| `/var/lib/dkit/shared/` | data sdíleného S3 | zachováno |
 | `/var/lib/dkit/traefik/dynamic/` | vygenerované směrování | generováno |
 
 ## Důležitá omezení
@@ -49,7 +54,7 @@ Rozložení na serveru:
 2. Blue/green se týká webu. Databáze, Redis, S3 a workery jsou sdílené mezi verzemi; workery se po přepnutí restartují s novým image.
 3. Migrace databáze nelze obecně vrátit. Používejte zpětně kompatibilní (expand/contract) migrace; rollback vrací jen image.
 4. Aplikace musí na `HEALTH_PATH` vracet 2xx/3xx, jinak deploy nepřepne provoz.
-5. Aplikace sdílí síť `dkit_edge` (kvůli Traefiku). Databáze a další služby jsou v interní síti každé aplikace a z ostatních aplikací dostupné nejsou.
+5. Aplikace sdílí síť `dkit_edge` (kvůli Traefiku). Vlastní databáze a služby jsou v interní síti každé aplikace; sdílené služby v interní síti `dkit_services`, kde každá aplikace má vlastní účet bez přístupu k datům ostatních.
 6. Web UI ovládá Docker, tj. má **práva roota na serveru**. Výchozí je jen `127.0.0.1` a přístup přes SSH tunel.
 7. Zálohy jsou skutečně externí až po nastavení Restic repozitáře mimo server a úspěšném testu obnovy.
 
@@ -100,15 +105,51 @@ sudo install -m 0600 deploy_key /etc/dkit/apps/shop/ssh/deploy_key
 ssh-keyscan github.com | sudo tee /etc/dkit/apps/shop/ssh/known_hosts   # otisk ověřte nezávisle
 ```
 
-Pak zkontrolujte konfiguraci a nasaďte:
+Pak zkontrolujte konfiguraci (ve web UI na záložce *Nastavení*, nebo z CLI) a nasaďte:
 
 ```bash
-sudo dkit app edit shop            # app.env – nastavení kitu
-sudo dkit app edit shop env        # proměnné aplikace a secrets
-sudo dkit deploy shop --migrate    # první nasazení včetně migrací
+sudo dkit app get shop                    # aktuální nastavení
+sudo dkit env set shop MAIL_MAILER=smtp MAIL_HOST=smtp.firma.cz
+sudo dkit deploy shop --migrate           # první nasazení včetně migrací
 ```
 
-## 3. Konfigurace aplikace (`app.env`)
+Další web stejného typu založíte jedním příkazem — dostane vlastní databázi, hesla a data:
+
+```bash
+sudo dkit app clone shop shop2 --domain shop2.firma.cz && sudo dkit deploy shop2
+```
+
+## 3. Snadné úpravy
+
+Všechno jde měnit ve **webovém rozhraní** (formuláře bez znalosti formátu souborů) nebo krátkými příkazy. Každá změna se zkontroluje; neplatná se vrátí a nic se nerozbije.
+
+| Co | Web UI | CLI |
+|---|---|---|
+| Domény | Aplikace → Nastavení | `dkit domain add shop www.shop.cz` · `dkit domain remove …` |
+| Port, healthcheck, build, zdroj, služby, limity | Aplikace → Nastavení | `dkit app set shop WEB_PORT=3000 MEMORY_LIMIT=1g` |
+| Proměnné prostředí a secrets | Aplikace → Proměnné | `dkit env set shop KLÍČ=hodnota` · `dkit env unset shop KLÍČ` · `dkit env list shop` |
+| Workery (fronty, plánovač, websockety) | Aplikace → Nastavení → Workery | `dkit worker add shop queue --cmd "php artisan queue:work" --user www-data` |
+| Další kontejnery | Aplikace → Soubory → compose.override.yaml | `dkit app edit shop compose.override.yaml` |
+| Globální nastavení | Nastavení | `dkit config set KEEP_PREVIOUS=0` · `dkit config edit` |
+| Vlastní preset (výchozí konfigurace nových webů) | Nastavení → Presety | `dkit preset create wordpress --from php` |
+| Vlastní Dockerfile šablona | Nastavení → Šablony buildu | `dkit template edit php` · `dkit template reset php` |
+| Nový web podle existujícího | Aplikace → Klon | `dkit app clone shop shop2 --domain shop2.cz` |
+
+Změny domén se projeví okamžitě. Ostatní změny převezme běžící web po **„Použít konfiguraci“** (`dkit apply shop`, bez buildu), změny zdroje/buildu po dalším deployi. Hromadně: `dkit apply --all`, `dkit deploy --all` nebo tlačítka na přehledu aplikací.
+
+## 4. Neomezený počet webů
+
+Počet webů omezuje jen výkon serveru. Kit řeší úzká místa, která by jinak brzdila desítky až stovky webů:
+
+- **Síťové adresy.** Docker má ve výchozím stavu adresní prostor jen pro ~30 sítí. dkit dává každé aplikaci malý subnet z `APP_SUBNET_POOL` (výchozí `10.210.0.0/16` po `/26` = 1024 aplikací; rozsah lze zvětšit, nesmí kolidovat s LAN).
+- **Sdílené služby.** `SHARED_SERVICES="mariadb postgres s3"` v `dkit.env` (nebo v UI *Nastavení*) způsobí, že nové weby nedostanou vlastní kontejner databáze/S3, ale vlastní **databázi, uživatele a bucket** v jedné sdílené instanci. Ušetří stovky MB RAM na web. Oprávnění jsou oddělená (uživatel webu nevidí cizí databáze; S3 klíč funguje jen pro vlastní bucket). Redis je vždy vlastní (~5 MB). Nastavení se při vytvoření webu zapíše do jeho `app.env`, takže pozdější změna globální hodnoty existující weby nepřesune; u webu jde změnit ručně (data se nepřenášejí — dump a import).
+- **RAM při deployi.** `KEEP_PREVIOUS=0` zastaví předchozí verzi po úspěšném deployi (rollback pak trvá pár sekund místo okamžitě).
+- **Disk.** Ponechávají se jen poslední image (`KEEP_IMAGES`), checkouty se po buildu mažou.
+- **Přehled.** Web UI má tabulku s vyhledáváním a filtrem stavu; `dkit apps --json` načte stav všech webů jedním dotazem na Docker.
+
+Doporučení pro desítky malých webů (např. WordPress, prezentace): `SHARED_SERVICES="mariadb s3"`, `KEEP_PREVIOUS=0`, vlastní preset přes `dkit preset create` a nové weby přes `dkit app create … --preset <váš>` nebo `dkit app clone`.
+
+## 5. Referenční přehled nastavení (`app.env`)
 
 | Klíč | Význam |
 |---|---|
@@ -124,6 +165,8 @@ sudo dkit deploy shop --migrate    # první nasazení včetně migrací
 | `WEB_CMD` | přepíše příkaz webového kontejneru |
 | `WORKERS` | seznam workerů; každý má `WORKER_<jméno>_CMD`, volitelně `_USER`, `_PORT` a `_PATH` (vlastní trasa, např. websockety `/app`) |
 | `SERVICES` | kontejnery služeb: `mariadb`, `postgres`, `redis`, `s3` |
+| `SHARED_SERVICES` | které z nich běží ve sdílené instanci (`mariadb postgres s3`); nastaví se při vytvoření z `dkit.env` |
+| `DB_NAME`, `DB_USER`, `S3_BUCKET` | jména databáze/uživatele/bucketu (výchozí podle jména aplikace) |
 | `PERSIST` | perzistentní adresáře `jméno:/cesta/v/kontejneru`; prázdný adresář se při prvním deployi naplní obsahem z image |
 | `PERSIST_OWNER` | `uid:gid` nových perzistentních adresářů (např. `33:33` pro www-data) |
 | `MIGRATE_CMD`, `MIGRATE_USER`, `AUTO_MIGRATE` | příkaz migrací, spouští se v novém image před přepnutím provozu (jen s `--migrate` nebo `AUTO_MIGRATE=1`) |
@@ -131,13 +174,13 @@ sudo dkit deploy shop --migrate    # první nasazení včetně migrací
 | `MEMORY_LIMIT` | limit paměti procesů aplikace, např. `1g` |
 | `KEEP_PREVIOUS` | `1` (výchozí) nechá předchozí slot běžet pro okamžitý rollback; `0` šetří RAM |
 | `PUBLIC` | `0` = bez veřejné trasy (interní služba) |
-| `MARIADB_IMAGE`, `POSTGRES_IMAGE`, `REDIS_IMAGE`, `S3_IMAGE` | verze služeb pro tuto aplikaci |
+| `MARIADB_IMAGE`, `POSTGRES_IMAGE`, `REDIS_IMAGE`, `S3_IMAGE`, `S3_ARGS` | verze a parametry vlastních služeb této aplikace |
 
 ### Služby a proměnné, které aplikace dostane
 
 Soubor `env` čte Docker Compose: hodnoty se znakem `$` uzavřete do jednoduchých uvozovek (`HESLO='a$b'`) nebo zdvojte `$$`.
 
-Každá aplikace má **vlastní** kontejnery služeb a vlastní náhodná hesla (`/etc/dkit/apps/<app>/services.env`). Připojení se předá automaticky do prostředí aplikace; hodnoty v `env` mají přednost.
+Každá aplikace má vlastní náhodná hesla (`/etc/dkit/apps/<app>/services.env`) a vlastní kontejnery služeb, případně vlastní databázi ve sdílené instanci (hostitel `dkit-mariadb`, `dkit-postgres`, `dkit-s3`). Připojení se předá automaticky do prostředí aplikace; hodnoty v `env` mají přednost.
 
 | Služba | Kontejner | Proměnné |
 |---|---|---|
@@ -146,7 +189,7 @@ Každá aplikace má **vlastní** kontejnery služeb a vlastní náhodná hesla 
 | `redis` | Redis 7.4 (AOF) | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_URL` |
 | `s3` | SeaweedFS (S3 API) | `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `AWS_*` (kompatibilní s Laravel `s3` diskem, AWS SDK, boto3) |
 
-Bucket se jménem aplikace (`S3_BUCKET`) se vytvoří automaticky. Databáze a Redis používají Docker volumes, S3 a `PERSIST` adresáře jsou v `/var/lib/dkit/apps/<app>/`.
+Bucket se jménem aplikace (`S3_BUCKET`, u jmen kratších než 3 znaky s příponou `-files`) se vytvoří automaticky. Databáze a Redis používají Docker volumes, S3 a `PERSIST` adresáře jsou v `/var/lib/dkit/apps/<app>/`.
 
 Pro cokoli dalšího (Meilisearch, Mailpit, ClickHouse…) přidejte `/etc/dkit/apps/<app>/compose.override.yaml`; sloučí se s vygenerovanou konfigurací:
 
@@ -161,7 +204,7 @@ volumes:
   meili: {}
 ```
 
-## 4. Nasazení, rollback a provoz
+## 6. Nasazení, rollback a provoz
 
 ```bash
 dkit apps                         # přehled
@@ -176,7 +219,8 @@ dkit exec shop -- php artisan tinker
 dkit db shell shop | dkit db dump shop > dump.sql | dkit db import shop < dump.sql
 dkit adminer shop                 # Adminer na 127.0.0.1:8081 (SSH tunel), pak: dkit adminer shop stop
 dkit stop shop / dkit start shop
-dkit app remove shop              # odregistrovat (data zůstanou), --purge smaže vše
+dkit app remove shop              # odregistrovat (data zůstanou), --purge smaže vše vč. sdílené DB a bucketu
+dkit deploy --all                 # postupně všechny weby (pokračuje i po chybě jednoho)
 ```
 
 Průběh `dkit deploy`:
@@ -190,7 +234,7 @@ Průběh `dkit deploy`:
 
 Selhání v kterémkoli kroku nechá provoz na předchozí verzi.
 
-## 5. Webové rozhraní
+## 7. Webové rozhraní
 
 ```bash
 sudo dkit ui start                              # build a spuštění kontejneru dkit-ui
@@ -198,13 +242,19 @@ sudo dkit ui token                              # přístupový token
 ssh -L 9000:127.0.0.1:9000 uživatel@server      # z pracovní stanice
 ```
 
-Otevřete `http://127.0.0.1:9000`. Rozhraní umí: přehled aplikací a kontejnerů, vytvoření aplikace z presetu, deploy (větev/tag, migrace), rollback, restart, start/stop, zálohu, úpravu `app.env`, `env` a `compose.override.yaml` s validací (neplatná změna se vrátí), logy a živý výstup úloh.
+Otevřete `http://127.0.0.1:9000`. Rozhraní umí:
+
+- **Přehled** všech webů s vyhledáváním, filtrem stavu a hromadnými akcemi (deploy / použít konfiguraci / záloha všech).
+- **Vytvoření** webu z presetu (včetně vlastních) a **klonování** existujícího.
+- U webu záložky **Přehled** (stav, kontejnery, logy, deploy, rollback, restart, start/stop, záloha), **Nastavení** (formulář: domény, port, zdroj a build, služby a sdílení, workery, trvalé adresáře, migrace, limity), **Proměnné** (tabulka proměnných, secrets skryté), **Soubory** (přímá úprava pro pokročilé) a **Klon a odstranění**.
+- **Nastavení** serveru: globální hodnoty, presety a šablony buildu.
+- Živý výstup všech úloh.
 
 - Token změníte `dkit ui token --rotate` (odhlásí všechny relace).
 - Veřejný přístup přes HTTPS: nastavte `UI_DOMAIN` v `dkit.env` a `dkit ui start`. Rozhraní má práva roota — zvažte omezení IP adres nebo VPN.
 - UI volá stejné CLI (`/opt/dkit/bin/dkit`), takže CLI a UI se nikdy nerozcházejí; souběžné operace nad jednou aplikací blokuje zámek.
 
-## 6. Zálohy
+## 8. Zálohy
 
 ```bash
 sudo cp /etc/dkit/backup.env.example /etc/dkit/backup.env && sudo chmod 0600 /etc/dkit/backup.env
@@ -213,7 +263,7 @@ sudo dkit backup --all              # nebo dkit backup shop
 sudo dkit backup list shop
 ```
 
-Záloha aplikace obsahuje SQL dump každé databáze, konfiguraci `/etc/dkit/apps/<app>`, `PERSIST` adresáře a data S3. Retence 7 denních / 5 týdenních / 12 měsíčních. Pravidelné spouštění nastavte systemd timerem nebo cronem až po úspěšném ručním běhu, např. `/etc/cron.d/dkit-backup`:
+Záloha aplikace obsahuje SQL dump každé databáze (i ze sdílené instance), konfiguraci `/etc/dkit/apps/<app>`, `PERSIST` adresáře a data vlastního S3. `--all` navíc zálohuje globální konfiguraci, presety, šablony a data sdíleného S3 (tag `dkit:_platform`). Retence 7 denních / 5 týdenních / 12 měsíčních. Pravidelné spouštění nastavte systemd timerem nebo cronem až po úspěšném ručním běhu, např. `/etc/cron.d/dkit-backup`:
 
 ```
 30 2 * * * root /usr/local/bin/dkit backup --all >> /var/log/dkit-backup.log 2>&1
@@ -221,7 +271,7 @@ Záloha aplikace obsahuje SQL dump každé databáze, konfiguraci `/etc/dkit/app
 
 Obnova: `restic restore <snapshot> --target /tmp/obnova`, pak `dkit db import <app> < …/mariadb.sql` (po rozbalení gzip) a zkopírování souborů. Obnovu pravidelně testujte v izolovaném prostředí.
 
-## 7. Nasazení z GitHub Actions
+## 9. Nasazení z GitHub Actions
 
 Vzor je v `examples/github-actions-deploy.yml`. Doporučení: samostatný uživatel `deploy` s omezeným sudo jen na konkrétní příkaz:
 
@@ -232,15 +282,15 @@ deploy ALL=(root) NOPASSWD: /usr/local/bin/dkit deploy shop *
 
 Nedávejte CI neomezený root SSH ani přístup k Docker socketu. Akce připněte na plné commit SHA.
 
-## 8. Šablony buildů
+## 10. Šablony buildů
 
 - **php** – nginx + PHP-FPM (8.4), Composer, frontend build (npm/pnpm/yarn), rozšíření `pdo_mysql pdo_pgsql intl bcmath gd zip redis opcache…`; další přes `TEMPLATE_ARGS="PHP_EXTENSIONS=imagick soap"`. Docroot `DOCROOT=public`.
 - **node** – `npm ci` / pnpm / yarn, `build` pokud existuje, `npm start`, port `$PORT` (3000), běží jako uživatel `node`.
 - **static** – volitelný npm build, výstup `STATIC_DIR` servírován neprivilegovaným nginx na 8080, `SPA=1` pro fallback na `index.html`.
 
-Proměnné z `BUILD_ARGS` se při buildu šablon zpřístupní jako `.env.production.local` (načítá Vite, Next.js, Nuxt) a vždy i jako `--build-arg`. Vlastní úpravu šablony uložte do `/etc/dkit/templates/<jméno>/Dockerfile`, upgrade ji nepřepíše.
+Proměnné z `BUILD_ARGS` se při buildu šablon zpřístupní jako `.env.production.local` (načítá Vite, Next.js, Nuxt) a vždy i jako `--build-arg`. Šablonu upravíte ve web UI (Nastavení → Šablony buildu) nebo `dkit template edit <jméno>`; vznikne vlastní kopie v `/etc/dkit/templates/<jméno>/`, kterou upgrade nepřepíše. Stejně lze vytvořit úplně novou šablonu a použít ji přes `BUILD=<jméno>`.
 
-## 9. Aplikace za proxy
+## 11. Aplikace za proxy
 
 Traefik předává `X-Forwarded-For/Proto/Host`. Aplikace musí proxy důvěřovat, jinak generuje `http://` odkazy:
 
@@ -248,6 +298,6 @@ Traefik předává `X-Forwarded-For/Proto/Host`. Aplikace musí proxy důvěřov
 - Symfony: `framework.trusted_proxies: '172.16.0.0/12,10.0.0.0/8'`.
 - Express: `app.set('trust proxy', true)`.
 
-## 10. Přechod z verze 1 (Laravel-only)
+## 12. Přechod z verze 1 (Laravel-only)
 
 Verze 1 používala `/opt/laravel-erp` a `/etc/laravel-erp`. Postup: `dkit app create erp --preset laravel …`, do `/etc/dkit/apps/erp/env` přeneste `APP_KEY` a další proměnné, `dkit deploy erp`, pak `dkit db import erp < dump.sql` z původní databáze a zkopírujte `storage/` do `/var/lib/dkit/apps/erp/data/storage/`. Starý stack zastavte před `dkit platform up` (porty 80/443).

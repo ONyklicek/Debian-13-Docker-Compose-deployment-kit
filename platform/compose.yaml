@@ -72,9 +72,73 @@ services:
     networks: [edge]
     logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
 
+  # Shared services, started on demand by dkit for apps with SHARED_SERVICES.
+  shared-mariadb:
+    image: ${MARIADB_IMAGE:-mariadb:11.4}
+    container_name: dkit-mariadb
+    profiles: ["shared"]
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${SHARED_MARIADB_ROOT_PASSWORD:-}
+      MARIADB_AUTO_UPGRADE: "1"
+      TZ: ${TZ:-Europe/Prague}
+    volumes: ["shared_mariadb:/var/lib/mysql"]
+    networks: [services]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 1m
+
+  shared-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    container_name: dkit-postgres
+    profiles: ["shared"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${SHARED_POSTGRES_PASSWORD:-}
+      TZ: ${TZ:-Europe/Prague}
+    volumes: ["shared_postgres:/var/lib/postgresql/data"]
+    networks: [services]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 1m
+
+  shared-s3:
+    image: ${S3_IMAGE:-chrislusf/seaweedfs:3.97}
+    container_name: dkit-s3
+    profiles: ["shared"]
+    restart: unless-stopped
+    command: server -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -volume.max=0 -master.volumeSizeLimitMB=1024 -master.volumePreallocate=false ${S3_ARGS:-}
+    volumes:
+      - ${DKIT_STATE:-/var/lib/dkit}/shared/s3:/data
+      - ${DKIT_STATE:-/var/lib/dkit}/shared/s3.json:/etc/seaweedfs/s3.json:ro
+    # edge: only so Traefik can serve an app's optional S3_DOMAIN
+    networks: [services, edge]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    security_opt: ["no-new-privileges:true"]
+
 networks:
   edge:
     name: dkit_edge
+  services:
+    name: dkit_services
+    internal: true
 
 volumes:
   traefik_acme: {}
+  shared_mariadb: {}
+  shared_postgres: {}
