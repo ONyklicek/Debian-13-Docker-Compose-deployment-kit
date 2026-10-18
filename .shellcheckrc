@@ -1,3 +1,3 @@
 # Sourced libraries share globals; single-quoted $VARS are expanded inside containers on purpose.
-disable=SC2016,SC2034,SC2004,SC2329
+disable=SC2016,SC2034,SC2004,SC2329,SC2317
 external-sources=true

@@ -178,7 +178,7 @@ prune_images(){
   local keep=${A[KEEP_IMAGES]:-$(g KEEP_IMAGES 3)} img
   docker images "dkit/$APP" --format '{{.Repository}}:{{.Tag}}' | tail -n "+$((keep + 1))" | while read -r img; do
     [[ $img == "${S[IMAGE_ACTIVE]:-}" || $img == "${S[IMAGE_PREVIOUS]:-}" ]] && continue
-    docker rmi "$img" >/dev/null 2>&1 && say "Smazán starý image $img" || true
+    if docker rmi "$img" >/dev/null 2>&1; then say "Smazán starý image $img"; fi
   done
 }
 
