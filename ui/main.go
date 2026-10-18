@@ -507,7 +507,7 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 	render(w, r, "app.html", page{Title: name, Section: "apps", Data: map[string]any{
 		"App": a, "Files": files, "Jobs": jobs.list(name, 10), "Tab": tab,
 		"Groups": appGroups, "Config": cfg, "BuildOptions": buildOptions(), "Workers": workersOf(cfg),
-		"Env": envVars(env),
+		"Env":       envVars(env),
 		"Shareable": []string{"mariadb", "postgres", "s3"},
 	}})
 }
