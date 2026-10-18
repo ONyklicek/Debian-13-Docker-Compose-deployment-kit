@@ -1,0 +1,9 @@
+{{template "head" .}}
+<div class="titlebar">
+  <h1>{{.Data.Title}}</h1>
+  <span id="job-state" class="badge {{if .Data.Running}}run{{else if eq .Data.Exit 0}}ok{{else}}err{{end}}">{{if .Data.Running}}běží{{else if eq .Data.Exit 0}}OK{{else}}chyba {{.Data.Exit}}{{end}}</span>
+  {{if .Data.App}}<a href="/apps/{{.Data.App}}">← {{.Data.App}}</a>{{end}}
+</div>
+<p class="muted">Spuštěno {{.Data.Started.Format "2. 1. 2006 15:04:05"}}</p>
+<pre class="console" id="job-log" data-job="{{.Data.ID}}"></pre>
+{{template "foot" .}}

@@ -1,0 +1,46 @@
+{{define "head"}}<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · dkit</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">dkit</a>
+  <nav>
+    <a href="/" {{if eq .Section "apps"}}class="on"{{end}}>Aplikace</a>
+    <a href="/apps/new" {{if eq .Section "new"}}class="on"{{end}}>Nová aplikace</a>
+    <a href="/jobs" {{if eq .Section "jobs"}}class="on"{{end}}>Úlohy</a>
+    <a href="/settings" {{if eq .Section "settings"}}class="on"{{end}}>Nastavení</a>
+  </nav>
+  <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Odhlásit</button></form>
+</header>
+<main>
+{{if .Flash}}<div class="flash ok">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="flash err"><pre>{{.Error}}</pre></div>{{end}}
+{{end}}
+
+{{define "foot"}}
+</main>
+</body>
+</html>{{end}}
+
+{{define "jobtable"}}
+<table class="list">
+  <thead><tr><th>Úloha</th><th>Spuštěno</th><th>Stav</th></tr></thead>
+  <tbody>
+  {{range .}}
+    <tr>
+      <td><a href="/jobs/{{.ID}}">{{.Title}}</a></td>
+      <td class="muted">{{ago .Started}}</td>
+      <td>{{if .Running}}<span class="badge run">běží</span>{{else if eq .Exit 0}}<span class="badge ok">OK</span>{{else}}<span class="badge err">chyba {{.Exit}}</span>{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="3" class="muted">Zatím žádné úlohy.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

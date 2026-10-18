@@ -1,0 +1,47 @@
+{{template "head" .}}
+<div class="titlebar">
+  <h1>Aplikace <span class="muted">({{len .Data.Apps}})</span></h1>
+  <span class="badge {{if eq .Data.Traefik "running"}}ok{{else}}err{{end}}">Traefik: {{.Data.Traefik}}</span>
+  <a class="btn primary" href="/apps/new">+ Nová aplikace</a>
+</div>
+{{if .Data.Apps}}
+<div class="toolbar">
+  <input type="search" id="filter" placeholder="Hledat podle jména, domény, služby…" autocomplete="off">
+  <select id="state-filter" aria-label="Stav">
+    <option value="">Všechny stavy</option><option value="ok">Běží</option><option value="warn">Problém</option><option value="none">Nenasazené</option>
+  </select>
+  <div class="bulk">
+    {{range $a := (list "deploy" "apply" "backup")}}
+    <form method="post" action="/bulk/{{$a}}" data-confirm="bulk-{{$a}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>{{if eq $a "deploy"}}Deploy všech{{else if eq $a "apply"}}Použít konfiguraci u všech{{else}}Záloha všeho{{end}}</button></form>
+    {{end}}
+  </div>
+</div>
+<div class="tablewrap">
+<table class="list apps" id="apps">
+  <thead><tr><th>Aplikace</th><th>Domény</th><th>Stav</th><th>Verze</th><th>Služby</th><th>Nasazeno</th></tr></thead>
+  <tbody>
+  {{range .Data.Apps}}
+    {{$st := "none"}}{{if .Error}}{{$st = "warn"}}{{else if .ActiveSlot}}{{if gt .Running 0}}{{$st = "ok"}}{{else}}{{$st = "warn"}}{{end}}{{end}}
+    <tr data-state="{{$st}}" data-search="{{.Name}} {{join .Domains " "}} {{join .Services " "}} {{.Build}} {{.Image}}">
+      <td><a href="/apps/{{.Name}}"><strong>{{.Name}}</strong></a></td>
+      <td class="domains">{{range .Domains}}<a href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a> {{end}}</td>
+      <td>{{if .Error}}<span class="badge err">{{.Error}}</span>{{else if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else}}<span class="badge warn">nenasazeno</span>{{end}}</td>
+      <td><code>{{short .Revision}}</code></td>
+      <td class="muted">{{join .Services ", "}} {{if .Shared}}<small>(sdílené: {{join .Shared ", "}})</small>{{end}}</td>
+      <td class="muted">{{or .DeployedAt "—"}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+<p class="muted" id="no-match" hidden>Nic nenalezeno.</p>
+{{else}}
+  <div class="card empty">
+    <h2>Zatím žádné aplikace</h2>
+    <p>Přidejte první web z Git repozitáře nebo hotového Docker image. Počet webů není omezen.</p>
+    <a class="btn primary" href="/apps/new">Vytvořit aplikaci</a>
+  </div>
+{{end}}
+<h2 class="section">Poslední úlohy</h2>
+{{template "jobtable" .Data.Jobs}}
+{{template "foot" .}}

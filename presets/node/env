@@ -1,0 +1,3 @@
+# Proměnné prostředí aplikace __APP__. DATABASE_URL, REDIS_URL, S3_* doplňuje dkit automaticky.
+NODE_ENV=production
+PORT=3000

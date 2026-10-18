@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# dkit — Docker Compose deployment kit for Debian 13: multi-app, blue/green, Traefik, backups.
+set -Eeuo pipefail
+umask 027
+
+_self=$(readlink -f "${BASH_SOURCE[0]}")
+DKIT_ROOT="${DKIT_ROOT:-$(dirname "$(dirname "$_self")")}"
+# shellcheck source=../lib/common.sh
+source "$DKIT_ROOT/lib/common.sh"
+# shellcheck source=../lib/render.sh
+source "$DKIT_ROOT/lib/render.sh"
+# shellcheck source=../lib/app.sh
+source "$DKIT_ROOT/lib/app.sh"
+# shellcheck source=../lib/deploy.sh
+source "$DKIT_ROOT/lib/deploy.sh"
+# shellcheck source=../lib/ops.sh
+source "$DKIT_ROOT/lib/ops.sh"
+# shellcheck source=../lib/config.sh
+source "$DKIT_ROOT/lib/config.sh"
+# shellcheck source=../lib/shared.sh
+source "$DKIT_ROOT/lib/shared.sh"
+# shellcheck source=../lib/platform.sh
+source "$DKIT_ROOT/lib/platform.sh"
+
+usage(){
+  cat <<'EOF'
+dkit — správa libovolného počtu webů v Docker Compose (blue/green, Traefik, zálohy)
+
+Aplikace
+  dkit apps [--json]                          přehled aplikací
+  dkit app create <jméno> --preset P --domain D [--repo URL] [--branch B]
+                  [--image IMG] [--services "mariadb redis s3"] [--port N]
+  dkit app clone <zdroj> <nová> --domain D [--no-env]   nový web podle existujícího
+  dkit app show <app> [--json]                detail a stav kontejnerů
+  dkit app get <app> [KLÍČ|--json]            nastavení (app.env)
+  dkit app set <app> KLÍČ=HODNOTA… [--unset KLÍČ]    změna nastavení (s validací)
+  dkit app edit <app> [app.env|env|compose.override.yaml]
+  dkit app check <app>
+  dkit app remove <app> [--purge]             odregistrovat (s --purge i smazat data)
+
+Rychlé úpravy
+  dkit domain list|add|remove <app> [doména…]
+  dkit env list|set|unset|import <app> [KLÍČ=HODNOTA…] [--show|--json]
+  dkit worker list|add|remove <app> [jméno] [--cmd "…" --port N --path /x --user u]
+  dkit config get|set|edit [KLÍČ=HODNOTA…]   globální nastavení (dkit.env)
+  dkit preset list|create|edit|remove [jméno] [--from preset]   vlastní presety
+  dkit template list|edit|reset [jméno]       vlastní Dockerfile šablony
+
+Nasazení (místo <app> lze použít --all)
+  dkit deploy <app> [--ref větev|tag|sha] [--migrate]
+  dkit rollback <app>
+  dkit apply <app>                            změny env/app.env bez nového buildu
+  dkit start|stop|restart <app>
+
+Provoz
+  dkit status
+  dkit logs <app> [služba…] [-f] [--tail N]
+  dkit exec <app> [služba] [-- příkaz…]
+  dkit db shell|dump|import <app>
+  dkit adminer <app> [start|stop] [port]
+  dkit backup [<app>|--all] | dkit backup list [<app>]
+
+Platforma
+  dkit platform up|status|logs|restart
+  dkit ui start|stop|status|token [--rotate]
+  dkit doctor
+
+Globální přepínače: --yes (bez potvrzování)
+EOF
+}
+
+main(){
+  local args=() a
+  for a in "$@"; do if [[ $a == --yes || $a == -y ]]; then export DKIT_YES=1; else args+=("$a"); fi; done
+  set -- "${args[@]}"
+  local cmd=${1:-help}; shift || true
+  case $cmd in
+    help|-h|--help) usage; return ;;
+    version|--version) cat "$DKIT_ROOT/VERSION" 2>/dev/null || echo dev; return ;;
+  esac
+  require_root
+  global_load
+  case $cmd in
+    apps|ls) cmd_app_list "$@" ;;
+    app)
+      local sub=${1:-list}; shift || true
+      case $sub in
+        create|new|add) cmd_app_create "$@" ;;
+        clone|copy) cmd_app_clone "$@" ;;
+        get) cmd_app_get "$@" ;;
+        set) cmd_app_set "$@" ;;
+        list|ls) cmd_app_list "$@" ;;
+        show|info) cmd_app_show "$@" ;;
+        edit) cmd_app_edit "$@" ;;
+        check|validate) cmd_app_check "$@" ;;
+        remove|rm|delete) cmd_app_remove "$@" ;;
+        *) die "Neznámý příkaz: app $sub" ;;
+      esac ;;
+    deploy|rollback|apply|start|stop|restart)
+      if [[ ${1:-} == --all ]]; then shift; cmd_all "cmd_$cmd" "$@"; else "cmd_$cmd" "$@"; fi ;;
+    domain|domains) cmd_domain "$@" ;;
+    env) cmd_env "$@" ;;
+    worker|workers) cmd_worker "$@" ;;
+    config) cmd_config "$@" ;;
+    preset|presets) cmd_preset "$@" ;;
+    template|templates) cmd_template "$@" ;;
+    status)
+      if traefik_running; then ok "Traefik běží"; else warn "Traefik neběží (dkit platform up)"; fi
+      cmd_app_list "$@" ;;
+    logs) cmd_logs "$@" ;;
+    exec|sh) cmd_exec "$@" ;;
+    db) cmd_db "$@" ;;
+    adminer) cmd_adminer "$@" ;;
+    backup) cmd_backup "$@" ;;
+    platform) cmd_platform "$@" ;;
+    ui) cmd_ui "$@" ;;
+    doctor) cmd_doctor ;;
+    *) usage >&2; die "Neznámý příkaz: $cmd" ;;
+  esac
+}
+
+main "$@"

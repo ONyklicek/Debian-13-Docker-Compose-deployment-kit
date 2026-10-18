@@ -1,0 +1,28 @@
+# Proměnné prostředí aplikace __APP__ (Laravel). Připojení k DB/Redis/S3 doplňuje dkit automaticky
+# (runtime.env); zde je lze přepsat. Soubor má práva 0600 — obsahuje secrets.
+APP_NAME=__APP__
+APP_ENV=production
+APP_DEBUG=false
+APP_KEY=__LARAVEL_KEY__
+APP_URL=https://__DOMAIN__
+LOG_CHANNEL=stderr
+LOG_LEVEL=info
+DB_CONNECTION=mariadb
+CACHE_STORE=redis
+SESSION_DRIVER=redis
+QUEUE_CONNECTION=redis
+REDIS_CLIENT=phpredis
+MAIL_MAILER=log
+VITE_APP_NAME=__APP__
+# Reverb (pokud je zapnutý worker reverb):
+# BROADCAST_CONNECTION=reverb
+# REVERB_APP_ID=__APP__
+# REVERB_APP_KEY=__HEX16__
+# REVERB_APP_SECRET=__HEX32__
+# REVERB_HOST=__APP__-reverb
+# REVERB_PORT=8080
+# REVERB_SCHEME=http
+# VITE_REVERB_APP_KEY=   (stejná hodnota jako REVERB_APP_KEY; přidejte do BUILD_ARGS)
+# VITE_REVERB_HOST=__DOMAIN__
+# VITE_REVERB_PORT=443
+# VITE_REVERB_SCHEME=https

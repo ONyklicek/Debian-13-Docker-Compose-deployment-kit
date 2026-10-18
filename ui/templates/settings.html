@@ -1,0 +1,63 @@
+{{template "head" .}}
+{{$cfg := .Data.Config}}
+<h1>Nastavení</h1>
+<form method="post" action="/settings" class="stackform" id="global-settings">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <section class="card">
+    <h2>Globální nastavení <small>/etc/dkit/dkit.env</small></h2>
+    <div class="formgrid">
+    {{range .Data.Fields}}{{$v := index $cfg .Key}}
+      {{if eq .Kind "select"}}
+        <label>{{.Label}}{{if .Help}} <small>{{.Help}}</small>{{end}}
+          <select name="{{.Key}}">{{range .Options}}<option value="{{.}}" {{if eq . $v}}selected{{end}}>{{if eq . "1"}}ano{{else if eq . "0"}}ne{{else}}{{.}}{{end}}</option>{{end}}</select></label>
+      {{else if eq .Kind "services"}}
+        <fieldset class="wide"><legend>{{.Label}}</legend>
+          {{$k := .Key}}{{range .Options}}<label class="inline"><input type="checkbox" name="{{$k}}" value="{{.}}" {{if has (fields $v) .}}checked{{end}}> {{.}}</label>{{end}}
+          {{if .Help}}<p class="hint">{{.Help}}</p>{{end}}
+        </fieldset>
+      {{else}}
+        <label>{{.Label}}{{if .Help}} <small>{{.Help}}</small>{{end}}<input name="{{.Key}}" value="{{$v}}" spellcheck="false"></label>
+      {{end}}
+    {{end}}
+    </div>
+  </section>
+  <div class="savebar">
+    <button class="primary" name="then" value="">Uložit</button>
+    <button name="then" value="platform">Uložit a restartovat platformu</button>
+    <span class="muted">Aplikace převezmou změny po „Použít konfiguraci“ (lze hromadně na přehledu).</span>
+  </div>
+</form>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Presety <small>výchozí konfigurace nových aplikací</small></h2>
+    <table class="list compact">
+      <tbody>
+      {{range .Data.Presets}}
+        <tr><td><a href="/presets/{{.Name}}">{{.Name}}</a>{{if .Local}} <span class="badge ok">vlastní</span>{{end}}</td><td class="muted">{{.Description}}</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+    <form method="post" action="" class="inline-form create-preset" id="create-preset">
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="create">
+      <input name="name" placeholder="nový-preset" pattern="[a-z][a-z0-9-]{0,30}" required>
+      <select name="from">{{range .Data.Presets}}<option value="{{.Name}}">z {{.Name}}</option>{{end}}</select>
+      <button>Vytvořit</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Šablony buildu <small>Dockerfile pro repozitáře bez vlastního</small></h2>
+    <table class="list compact">
+      <tbody>
+      {{range .Data.Templates}}
+        <tr><td><a href="/templates/{{.Name}}">{{.Name}}</a>{{if .Local}} <span class="badge ok">upraveno</span>{{end}}</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+    <form method="get" action="" class="inline-form" id="create-template">
+      <input name="name" placeholder="nová-šablona" pattern="[a-z][a-z0-9-]{0,30}" required>
+      <button>Vytvořit</button>
+    </form>
+  </section>
+</div>
+{{template "foot" .}}

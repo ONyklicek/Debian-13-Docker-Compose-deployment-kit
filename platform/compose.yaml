@@ -1,0 +1,144 @@
+# Shared platform: Traefik (edge proxy, Let's Encrypt) and the optional web UI.
+# Started by 'dkit platform up' / 'dkit ui start'; variables come from /etc/dkit/dkit.env.
+name: dkit
+
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.5}
+    container_name: dkit-traefik
+    restart: unless-stopped
+    command:
+      - --global.checkNewVersion=false
+      - --global.sendAnonymousUsage=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=300s
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?Nastavte ACME_EMAIL v /etc/dkit/dkit.env}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --accesslog=${TRAEFIK_ACCESSLOG:-true}
+      - --log.level=${TRAEFIK_LOG_LEVEL:-INFO}
+      # Read-only API on the "traefik" entrypoint, bound to loopback inside the container (not
+      # reachable from apps or the host); dkit uses it to confirm route switches.
+      - --api.insecure=true
+      - --api.dashboard=false
+      - --entrypoints.traefik.address=127.0.0.1:8080
+      - --ping=true
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:80:80"
+      - "${HTTP_BIND:-0.0.0.0}:443:443"
+    volumes:
+      - ${DKIT_STATE:-/var/lib/dkit}/traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik_acme:/letsencrypt
+    networks: [edge]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Web UI. It controls Docker and therefore has root-equivalent power over the host:
+  # keep it on loopback (SSH tunnel) unless UI_DOMAIN is deliberately set.
+  ui:
+    image: dkit-ui:local
+    build: ${DKIT_ROOT:-/opt/dkit}/ui
+    container_name: dkit-ui
+    profiles: ["ui"]
+    restart: unless-stopped
+    hostname: ${DKIT_HOSTNAME:-dkit}
+    environment:
+      DKIT_ROOT: ${DKIT_ROOT:-/opt/dkit}
+      DKIT_ETC: ${DKIT_ETC:-/etc/dkit}
+      DKIT_STATE: ${DKIT_STATE:-/var/lib/dkit}
+      DKIT_HOSTNAME: ${DKIT_HOSTNAME:-dkit}
+      TZ: ${TZ:-Europe/Prague}
+    ports:
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-9000}:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DKIT_ROOT:-/opt/dkit}:${DKIT_ROOT:-/opt/dkit}:ro
+      - ${DKIT_ETC:-/etc/dkit}:${DKIT_ETC:-/etc/dkit}
+      - ${DKIT_STATE:-/var/lib/dkit}:${DKIT_STATE:-/var/lib/dkit}
+    networks: [edge]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+
+  # Shared services, started on demand by dkit for apps with SHARED_SERVICES.
+  shared-mariadb:
+    image: ${MARIADB_IMAGE:-mariadb:11.4}
+    container_name: dkit-mariadb
+    profiles: ["shared"]
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${SHARED_MARIADB_ROOT_PASSWORD:-}
+      MARIADB_AUTO_UPGRADE: "1"
+      TZ: ${TZ:-Europe/Prague}
+    volumes: ["shared_mariadb:/var/lib/mysql"]
+    networks: [services]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 1m
+
+  shared-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    container_name: dkit-postgres
+    profiles: ["shared"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${SHARED_POSTGRES_PASSWORD:-}
+      TZ: ${TZ:-Europe/Prague}
+    volumes: ["shared_postgres:/var/lib/postgresql/data"]
+    networks: [services]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 1m
+
+  shared-s3:
+    image: ${S3_IMAGE:-chrislusf/seaweedfs:3.97}
+    container_name: dkit-s3
+    profiles: ["shared"]
+    restart: unless-stopped
+    command: server -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -volume.max=0 -master.volumeSizeLimitMB=1024 -master.volumePreallocate=false ${S3_ARGS:-}
+    volumes:
+      - ${DKIT_STATE:-/var/lib/dkit}/shared/s3:/data
+      - ${DKIT_STATE:-/var/lib/dkit}/shared/s3.json:/etc/seaweedfs/s3.json:ro
+    # edge: only so Traefik can serve an app's optional S3_DOMAIN
+    networks: [services, edge]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  edge:
+    name: dkit_edge
+  services:
+    name: dkit_services
+    internal: true
+
+volumes:
+  traefik_acme: {}
+  shared_mariadb: {}
+  shared_postgres: {}
