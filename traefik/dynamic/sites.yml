@@ -1,0 +1,25 @@
+http:
+  routers:
+    erp-web:
+      rule: "Host(`erp.example.com`)"
+      entryPoints: [websecure]
+      service: erp-svc
+      tls:
+        certResolver: le
+      priority: 100
+    erp-reverb:
+      rule: "Host(`erp.example.com`) && PathRegexp(`^/app/[^/]+`)"
+      entryPoints: [websecure]
+      service: reverb-svc
+      tls:
+        certResolver: le
+      priority: 200
+  services:
+    erp-svc:
+      loadBalancer:
+        servers:
+          - url: "http://app-blue:8080"
+    reverb-svc:
+      loadBalancer:
+        servers:
+          - url: "http://reverb:8080"

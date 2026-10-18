@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "name": "erp",
+      "domain": "erp.example.com",
+      "upstream": "http://app-blue:8080",
+      "enabled": true,
+      "kind": "web",
+      "notes": "Výchozí ERP web"
+    }
+  ]
+}

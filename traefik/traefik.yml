@@ -1,0 +1,4 @@
+# Static config is intentionally minimal; routes live in dynamic/active.yml.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
