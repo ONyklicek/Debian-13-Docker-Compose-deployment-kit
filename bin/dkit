@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# dkit — Docker Compose deployment kit for Debian 13: multi-app, blue/green, Traefik, backups.
+set -Eeuo pipefail
+umask 027
+
+_self=$(readlink -f "${BASH_SOURCE[0]}")
+DKIT_ROOT="${DKIT_ROOT:-$(dirname "$(dirname "$_self")")}"
+# shellcheck source=../lib/common.sh
+source "$DKIT_ROOT/lib/common.sh"
+# shellcheck source=../lib/render.sh
+source "$DKIT_ROOT/lib/render.sh"
+# shellcheck source=../lib/app.sh
+source "$DKIT_ROOT/lib/app.sh"
+# shellcheck source=../lib/deploy.sh
+source "$DKIT_ROOT/lib/deploy.sh"
+# shellcheck source=../lib/ops.sh
+source "$DKIT_ROOT/lib/ops.sh"
+# shellcheck source=../lib/platform.sh
+source "$DKIT_ROOT/lib/platform.sh"
+
+usage(){
+  cat <<'EOF'
+dkit — správa aplikací v Docker Compose (blue/green, Traefik, zálohy)
+
+Aplikace
+  dkit apps [--json]                        přehled aplikací
+  dkit app create <jméno> --preset P --domain D [--repo URL] [--branch B]
+                  [--image IMG] [--services "mariadb redis s3"] [--port N] [--yes]
+                                            presety: laravel php node static dockerfile image
+  dkit app show <app> [--json]              detail a stav kontejnerů
+  dkit app edit <app> [app.env|env|compose.override.yaml]
+  dkit app check <app>                      validace konfigurace a přegenerování souborů
+  dkit app remove <app> [--purge] [--yes]   odregistrovat (s --purge i smazat data)
+
+Nasazení
+  dkit deploy <app> [--ref větev|tag|sha] [--migrate]
+  dkit rollback <app>                       přepnout zpět na předchozí verzi
+  dkit apply <app>                          použít změny env/app.env bez nového buildu
+  dkit start|stop <app>
+  dkit restart <app> [služba]
+
+Provoz
+  dkit status                               platforma + aplikace
+  dkit logs <app> [služba…] [-f] [--tail N]
+  dkit exec <app> [služba] [-- příkaz…]     (výchozí: aktivní web, sh)
+  dkit db shell|dump|import <app>           databázová konzole / dump na stdout / import ze stdin
+  dkit adminer <app> [start|stop] [port]    Adminer jen na 127.0.0.1 (přes SSH tunel)
+  dkit backup [<app>|--all]                 Restic záloha (DB dump + perzistentní data + S3)
+  dkit backup list [<app>]
+
+Platforma
+  dkit platform up|status|logs|restart      Traefik (80/443, Let's Encrypt)
+  dkit ui start|stop|status|token [--rotate]  webové rozhraní
+  dkit doctor                               kontrola prostředí
+
+Globální přepínače: --yes (bez potvrzování)
+EOF
+}
+
+main(){
+  local args=() a
+  for a in "$@"; do if [[ $a == --yes || $a == -y ]]; then export DKIT_YES=1; else args+=("$a"); fi; done
+  set -- "${args[@]}"
+  local cmd=${1:-help}; shift || true
+  case $cmd in
+    help|-h|--help) usage; return ;;
+    version|--version) cat "$DKIT_ROOT/VERSION" 2>/dev/null || echo dev; return ;;
+  esac
+  require_root
+  global_load
+  case $cmd in
+    apps|ls) cmd_app_list "$@" ;;
+    app)
+      local sub=${1:-list}; shift || true
+      case $sub in
+        create|new|add) cmd_app_create "$@" ;;
+        list|ls) cmd_app_list "$@" ;;
+        show|info) cmd_app_show "$@" ;;
+        edit) cmd_app_edit "$@" ;;
+        check|validate) cmd_app_check "$@" ;;
+        remove|rm|delete) cmd_app_remove "$@" ;;
+        *) die "Neznámý příkaz: app $sub" ;;
+      esac ;;
+    deploy) cmd_deploy "$@" ;;
+    rollback) cmd_rollback "$@" ;;
+    apply) cmd_apply "$@" ;;
+    start) cmd_start "$@" ;;
+    stop) cmd_stop "$@" ;;
+    restart) cmd_restart "$@" ;;
+    status)
+      if traefik_running; then ok "Traefik běží"; else warn "Traefik neběží (dkit platform up)"; fi
+      cmd_app_list "$@" ;;
+    logs) cmd_logs "$@" ;;
+    exec|sh) cmd_exec "$@" ;;
+    db) cmd_db "$@" ;;
+    adminer) cmd_adminer "$@" ;;
+    backup) cmd_backup "$@" ;;
+    platform) cmd_platform "$@" ;;
+    ui) cmd_ui "$@" ;;
+    doctor) cmd_doctor ;;
+    *) usage >&2; die "Neznámý příkaz: $cmd" ;;
+  esac
+}
+
+main "$@"

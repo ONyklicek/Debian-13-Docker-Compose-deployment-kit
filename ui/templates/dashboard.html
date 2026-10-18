@@ -1,0 +1,33 @@
+{{template "head" .}}
+<div class="titlebar">
+  <h1>Aplikace</h1>
+  <span class="badge {{if eq .Data.Traefik "running"}}ok{{else}}err{{end}}">Traefik: {{.Data.Traefik}}</span>
+  <a class="btn primary" href="/apps/new">+ Nová aplikace</a>
+</div>
+<div class="cards">
+{{range .Data.Apps}}
+  <a class="card app" href="/apps/{{.Name}}">
+    <div class="row">
+      <h2>{{.Name}}</h2>
+      {{if .Error}}<span class="badge err">{{.Error}}</span>
+      {{else if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>
+      {{else}}<span class="badge warn">nenasazeno</span>{{end}}
+    </div>
+    <div class="muted">{{join .Domains ", "}}</div>
+    <dl>
+      <dt>Zdroj</dt><dd>{{if eq .Source "image"}}{{.Image}}{{else}}{{.Build}} · {{.Branch}}{{end}}</dd>
+      <dt>Verze</dt><dd><code>{{short .Revision}}</code>{{if .ActiveSlot}} ({{.ActiveSlot}}){{end}}</dd>
+      {{if .Services}}<dt>Služby</dt><dd>{{join .Services ", "}}</dd>{{end}}
+    </dl>
+  </a>
+{{else}}
+  <div class="card empty">
+    <h2>Zatím žádné aplikace</h2>
+    <p>Přidejte první aplikaci z Git repozitáře nebo hotového Docker image.</p>
+    <a class="btn primary" href="/apps/new">Vytvořit aplikaci</a>
+  </div>
+{{end}}
+</div>
+<h2 class="section">Poslední úlohy</h2>
+{{template "jobtable" .Data.Jobs}}
+{{template "foot" .}}

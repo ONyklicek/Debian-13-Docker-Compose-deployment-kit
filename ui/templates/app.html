@@ -1,0 +1,91 @@
+{{template "head" .}}
+{{with .Data.App}}
+<div class="titlebar">
+  <h1>{{.Name}}</h1>
+  {{range .Domains}}<a class="muted" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a>{{end}}
+</div>
+<div class="grid2">
+  <section class="card">
+    <h2>Stav</h2>
+    <dl>
+      <dt>Aktivní verze</dt><dd>{{if .ActiveSlot}}<code>{{.Revision}}</code> · slot {{.ActiveSlot}}{{else}}nenasazeno{{end}}</dd>
+      <dt>Nasazeno</dt><dd>{{or .DeployedAt "—"}}</dd>
+      <dt>Předchozí</dt><dd><code>{{or .Previous "—"}}</code></dd>
+      <dt>Zdroj</dt><dd>{{if eq .Source "image"}}{{.Image}}{{else}}{{.Repo}} ({{.Branch}}) · build {{.Build}}{{end}}</dd>
+      <dt>Služby</dt><dd>{{if .Services}}{{join .Services ", "}}{{else}}—{{end}}</dd>
+      <dt>Workery</dt><dd>{{if .Workers}}{{join .Workers ", "}}{{else}}—{{end}}</dd>
+    </dl>
+    <table class="list compact">
+      <thead><tr><th>Kontejner</th><th>Stav</th><th></th></tr></thead>
+      <tbody>
+      {{range .Containers}}
+        <tr><td>{{.Service}}</td><td><span class="badge {{if eq .State "running"}}ok{{else}}warn{{end}}">{{.State}}</span> <span class="muted">{{.Status}}</span></td>
+          <td><a href="/apps/{{$.Data.App.Name}}/logs?service={{.Service}}">logy</a></td></tr>
+      {{else}}<tr><td colspan="3" class="muted">Žádné kontejnery.</td></tr>{{end}}
+      </tbody>
+    </table>
+    <p><a href="/apps/{{.Name}}/logs">Zobrazit logy aplikace →</a></p>
+  </section>
+  <section class="card">
+    <h2>Akce</h2>
+    <form method="post" action="/apps/{{.Name}}/action/deploy" class="stack">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      {{if ne .Source "image"}}<label>Větev / tag / commit <small>prázdné = {{.Branch}}</small><input name="ref" placeholder="{{.Branch}}"></label>
+      <label class="inline"><input type="checkbox" name="migrate" value="1"> Spustit migrace (MIGRATE_CMD)</label>{{end}}
+      <button class="primary">Deploy</button>
+    </form>
+    <div class="actions">
+      {{range $a := (list "rollback" "apply" "restart" "start" "stop" "backup")}}
+      <form method="post" action="/apps/{{$.Data.App.Name}}/action/{{$a}}" data-confirm="{{$a}}">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button>{{actionTitle $a}}</button>
+      </form>
+      {{end}}
+    </div>
+    <h3>Poslední úlohy</h3>
+    {{template "jobtable" $.Data.Jobs}}
+  </section>
+</div>
+{{end}}
+
+<section class="card">
+  <h2>Konfigurace</h2>
+  <div class="tabs" role="tablist">
+    <button type="button" data-tab="tab-app" class="on">app.env <small>nastavení kitu</small></button>
+    <button type="button" data-tab="tab-env">env <small>proměnné aplikace</small></button>
+    <button type="button" data-tab="tab-override">compose.override.yaml <small>pokročilé</small></button>
+  </div>
+  <form method="post" action="/apps/{{.Data.App.Name}}/files/app.env" id="tab-app" class="tab on">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <textarea name="content" spellcheck="false" rows="24">{{index .Data.Files "app.env"}}</textarea>
+    <button class="primary">Uložit app.env</button>
+  </form>
+  <form method="post" action="/apps/{{.Data.App.Name}}/files/env" id="tab-env" class="tab">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p class="hint">Obsahuje secrets. Připojení k DB/Redis/S3 doplňuje dkit automaticky; zde je lze přepsat.</p>
+    <textarea name="content" spellcheck="false" rows="24">{{index .Data.Files "env"}}</textarea>
+    <button class="primary">Uložit env</button>
+  </form>
+  <form method="post" action="/apps/{{.Data.App.Name}}/files/compose.override.yaml" id="tab-override" class="tab">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p class="hint">Doplňky Docker Compose (další kontejnery, volumes, limity). Sloučí se s vygenerovanou konfigurací.</p>
+    <textarea name="content" spellcheck="false" rows="24">{{index .Data.Files "compose.override.yaml"}}</textarea>
+    <button class="primary">Uložit override</button>
+  </form>
+</section>
+
+<section class="card danger">
+  <h2>Odstranění</h2>
+  <form method="post" action="/apps/{{.Data.App.Name}}/action/remove" data-confirm="remove">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p>Zastaví kontejnery a přesune konfiguraci do archivu. Data zůstanou.</p>
+    <button>Odregistrovat</button>
+  </form>
+  <form method="post" action="/apps/{{.Data.App.Name}}/action/purge">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p>Nevratně smaže kontejnery, databáze, soubory i konfiguraci. Pro potvrzení opište jméno aplikace.</p>
+    <input name="confirm" placeholder="{{.Data.App.Name}}" autocomplete="off">
+    <button class="dangerbtn">Smazat včetně dat</button>
+  </form>
+</section>
+{{template "foot" .}}

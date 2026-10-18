@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Přihlášení · dkit</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="center">
+<form method="post" action="/login" class="card login">
+  <h1>dkit</h1>
+  <p class="muted">Zadejte přístupový token. Na serveru jej zobrazíte příkazem <code>sudo dkit ui token</code>.</p>
+  {{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
+  <label>Token<input type="password" name="token" autocomplete="current-password" autofocus required></label>
+  <button class="primary">Přihlásit</button>
+</form>
+</body>
+</html>

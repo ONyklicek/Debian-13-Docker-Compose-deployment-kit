@@ -1,0 +1,80 @@
+# Shared platform: Traefik (edge proxy, Let's Encrypt) and the optional web UI.
+# Started by 'dkit platform up' / 'dkit ui start'; variables come from /etc/dkit/dkit.env.
+name: dkit
+
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.5}
+    container_name: dkit-traefik
+    restart: unless-stopped
+    command:
+      - --global.checkNewVersion=false
+      - --global.sendAnonymousUsage=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=300s
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?Nastavte ACME_EMAIL v /etc/dkit/dkit.env}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --accesslog=${TRAEFIK_ACCESSLOG:-true}
+      - --log.level=${TRAEFIK_LOG_LEVEL:-INFO}
+      # Read-only API on the "traefik" entrypoint, bound to loopback inside the container (not
+      # reachable from apps or the host); dkit uses it to confirm route switches.
+      - --api.insecure=true
+      - --api.dashboard=false
+      - --entrypoints.traefik.address=127.0.0.1:8080
+      - --ping=true
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:80:80"
+      - "${HTTP_BIND:-0.0.0.0}:443:443"
+    volumes:
+      - ${DKIT_STATE:-/var/lib/dkit}/traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik_acme:/letsencrypt
+    networks: [edge]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Web UI. It controls Docker and therefore has root-equivalent power over the host:
+  # keep it on loopback (SSH tunnel) unless UI_DOMAIN is deliberately set.
+  ui:
+    image: dkit-ui:local
+    build: ${DKIT_ROOT:-/opt/dkit}/ui
+    container_name: dkit-ui
+    profiles: ["ui"]
+    restart: unless-stopped
+    hostname: ${DKIT_HOSTNAME:-dkit}
+    environment:
+      DKIT_ROOT: ${DKIT_ROOT:-/opt/dkit}
+      DKIT_ETC: ${DKIT_ETC:-/etc/dkit}
+      DKIT_STATE: ${DKIT_STATE:-/var/lib/dkit}
+      DKIT_HOSTNAME: ${DKIT_HOSTNAME:-dkit}
+      TZ: ${TZ:-Europe/Prague}
+    ports:
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-9000}:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DKIT_ROOT:-/opt/dkit}:${DKIT_ROOT:-/opt/dkit}:ro
+      - ${DKIT_ETC:-/etc/dkit}:${DKIT_ETC:-/etc/dkit}
+      - ${DKIT_STATE:-/var/lib/dkit}:${DKIT_STATE:-/var/lib/dkit}
+    networks: [edge]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+
+networks:
+  edge:
+    name: dkit_edge
+
+volumes:
+  traefik_acme: {}

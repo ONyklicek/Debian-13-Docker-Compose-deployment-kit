@@ -1,0 +1,33 @@
+{{template "head" .}}
+<h1>Nová aplikace</h1>
+<form method="post" action="/apps/new" class="card form" id="newapp">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Jméno <small>malá písmena, číslice, pomlčka</small>
+    <input name="name" required pattern="[a-z][a-z0-9-]{0,30}" placeholder="shop"></label>
+  <label>Preset
+    <select name="preset" id="preset">
+      {{range .Data.Presets}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+  </label>
+  <p class="hint" id="preset-hint"></p>
+  <label>Domény <small>čárkou oddělené, první je hlavní</small>
+    <input name="domains" required placeholder="shop.firma.cz, www.shop.firma.cz"></label>
+  <div data-for="git">
+    <label>Git repozitář <small>SSH nebo HTTPS URL</small>
+      <input name="repo" placeholder="git@github.com:firma/shop.git"></label>
+    <label>Větev<input name="branch" value="main"></label>
+  </div>
+  <div data-for="image">
+    <label>Docker image<input name="image" placeholder="ghcr.io/firma/app:1.2.3"></label>
+  </div>
+  <label>Port aplikace <small>volitelné, jinak podle presetu</small><input name="port" inputmode="numeric" pattern="[0-9]{2,5}"></label>
+  <fieldset>
+    <legend><label class="inline"><input type="checkbox" name="custom_services" value="1" id="custom-services"> Vlastní výběr služeb (jinak podle presetu)</label></legend>
+    <div class="checks" id="services">
+      {{range .Data.Services}}<label class="inline"><input type="checkbox" name="services" value="{{.}}"> {{.}}</label>{{end}}
+    </div>
+    <p class="hint">mariadb / postgres = databáze, redis = cache a fronty, s3 = objektové úložiště (SeaweedFS). Každá aplikace dostane vlastní kontejnery a hesla.</p>
+  </fieldset>
+  <button class="primary">Vytvořit</button>
+</form>
+{{template "foot" .}}

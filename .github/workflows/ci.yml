@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x -P SCRIPTDIR bin/dkit lib/*.sh install.sh
+      - name: Go (web UI)
+        working-directory: ui
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go build -o /dev/null .
+      - name: Dockerfile templates
+        run: |
+          mkdir -p /tmp/ctx
+          for t in php node static; do docker buildx build --check -f templates/$t/Dockerfile /tmp/ctx; done
+          docker buildx build --check ui
+      - name: Compose
+        run: |
+          printf 'ACME_EMAIL=ci@example.org\n' > /tmp/dkit.env
+          docker compose -p dkit -f platform/compose.yaml --env-file /tmp/dkit.env --profile ui config -q

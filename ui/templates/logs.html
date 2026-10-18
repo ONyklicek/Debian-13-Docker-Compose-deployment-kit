@@ -1,0 +1,11 @@
+{{template "head" .}}
+<div class="titlebar">
+  <h1>Logy: <a href="/apps/{{.Data.Name}}">{{.Data.Name}}</a>{{if .Data.Service}} / {{.Data.Service}}{{end}}</h1>
+  <form method="get" class="inline-form">
+    {{if .Data.Service}}<input type="hidden" name="service" value="{{.Data.Service}}">{{end}}
+    <label class="inline">Řádků <input name="tail" value="{{.Data.Tail}}" size="5" inputmode="numeric"></label>
+    <button>Obnovit</button>
+  </form>
+</div>
+<pre class="console">{{.Data.Output}}</pre>
+{{template "foot" .}}

@@ -1,8 +1,0 @@
-.git
-.env
-.env.*
-!.env.example
-vendor
-node_modules
-npm-debug.log*
-.DS_Store
