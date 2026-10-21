@@ -3,6 +3,7 @@ package deploymentstate
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -36,7 +37,7 @@ func TestSaveAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat state file: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("state file mode = %04o, want 0600", info.Mode().Perm())
 	}
 }
