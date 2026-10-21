@@ -9,12 +9,36 @@ permissions:
   contents: read
 
 jobs:
+  portable-go:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test portable CLI
+        run: go test ./...
+      - name: Build portable CLI
+        run: go build ./cmd/dkit
+
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
         run: shellcheck -x -P SCRIPTDIR bin/dkit lib/*.sh install.sh
+      - name: Set up Go for web UI
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ui/go.mod
+      - name: Go (portable CLI)
+        run: |
+          test -z "$(gofmt -l cmd/dkit internal presets templates)" || { gofmt -l cmd/dkit internal presets templates; exit 1; }
+          go vet ./...
+          go build -o /dev/null ./cmd/dkit
       - name: Go (web UI)
         working-directory: ui
         run: |
