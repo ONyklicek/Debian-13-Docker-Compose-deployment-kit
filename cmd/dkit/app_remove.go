@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,10 +9,12 @@ import (
 	"time"
 
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appconfig"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/applock"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/deploymentstate"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/portable"
 )
 
-func removeAppCommand(args []string, paths portable.Paths, output io.Writer) error {
+func removeAppCommand(args []string, paths portable.Paths, output io.Writer) (returnErr error) {
 	if len(args) == 0 || !appconfig.ValidName(args[0]) {
 		return fmt.Errorf("usage: dkit app remove <name> --yes [--purge]")
 	}
@@ -32,6 +35,20 @@ func removeAppCommand(args []string, paths portable.Paths, output io.Writer) err
 	}
 	if paths.Config == "" || paths.State == "" {
 		return fmt.Errorf("portable config and state directories are required")
+	}
+	lock, err := applock.Acquire(paths.State, name)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, applock.Release(name, lock))
+	}()
+	deployment, err := deploymentstate.Load(paths.State, name)
+	if err != nil {
+		return err
+	}
+	if deployment.ActiveSlot != "" {
+		return fmt.Errorf("app %q uses blue/green slots; stop/cleanup support is not available yet, refusing removal to protect its active route and containers", name)
 	}
 
 	appDir := filepath.Join(paths.Config, "apps", name)
@@ -58,7 +75,17 @@ func removeAppCommand(args []string, paths portable.Paths, output io.Writer) err
 	if purge {
 		composeArgs = append(composeArgs, "--volumes")
 	}
+	routeBefore, routeExisted, err := removeAppTraefikRoute(paths.State, name)
+	if err != nil {
+		return fmt.Errorf("remove app %q Traefik route before stopping it: %w", name, err)
+	}
 	if err := runCommand("docker", composeArgs...); err != nil {
+		if routeExisted {
+			if restoreErr := restoreAppTraefikRoute(paths.State, name, routeBefore); restoreErr != nil {
+				return fmt.Errorf("stop app %q failed (%v), and its previous Traefik route could not be restored: %w", name, err, restoreErr)
+			}
+			return fmt.Errorf("stop app %q failed; its previous Traefik route was restored: %w", name, err)
+		}
 		return fmt.Errorf("stop app %q before removal: %w", name, err)
 	}
 

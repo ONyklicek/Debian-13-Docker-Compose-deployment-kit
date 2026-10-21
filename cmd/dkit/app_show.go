@@ -10,6 +10,7 @@ import (
 
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appconfig"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/buildinfo"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/deploymentstate"
 )
 
 type appDetails struct {
@@ -25,6 +26,9 @@ type appDetails struct {
 	Shared         []string `json:"shared"`
 	Workers        []string `json:"workers"`
 	Revision       string   `json:"revision,omitempty"`
+	ActiveSlot     string   `json:"active_slot,omitempty"`
+	Previous       string   `json:"previous_revision,omitempty"`
+	DeployedAt     string   `json:"deployed_at,omitempty"`
 	ConfigValid    bool     `json:"config_valid"`
 	RuntimeChecked bool     `json:"runtime_checked"`
 	RuntimeScope   string   `json:"runtime_scope"`
@@ -57,6 +61,16 @@ func showApp(args []string, configDir, stateDir string, output io.Writer) error 
 	details.Revision, err = readBuildRevision(stateDir, name)
 	if err != nil {
 		return err
+	}
+	deployment, err := deploymentstate.Load(stateDir, name)
+	if err != nil {
+		return err
+	}
+	details.ActiveSlot = deployment.ActiveSlot
+	details.Previous = deployment.PrevRevision
+	details.DeployedAt = deployment.DeployedAt
+	if deployment.ActiveRevision != "" {
+		details.Revision = deployment.ActiveRevision
 	}
 	if len(args) == 2 && args[1] == "--json" {
 		if err := json.NewEncoder(output).Encode(details); err != nil {

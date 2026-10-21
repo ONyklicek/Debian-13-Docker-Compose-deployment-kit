@@ -3,7 +3,7 @@
 {{with .Data.App}}
 <div class="titlebar">
   <h1>{{.Name}}</h1>
-  {{if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else}}<span class="badge warn">nenasazeno</span>{{end}}
+  {{if .RuntimeChecked}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else if eq $d.UIEngine "portable"}}<span class="badge">runtime neověřen</span>{{else}}<span class="badge warn">nenasazeno</span>{{end}}
   {{range .Domains}}<a class="muted" href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a>{{end}}
 </div>
 {{end}}
@@ -22,7 +22,7 @@
   <section class="card">
     <h2>Stav</h2>
     <dl>
-      <dt>Aktivní verze</dt><dd>{{if .ActiveSlot}}<code>{{.Revision}}</code> · slot {{.ActiveSlot}}{{else}}nenasazeno{{end}}</dd>
+      <dt>Aktivní verze</dt><dd>{{if .ActiveSlot}}<code>{{.Revision}}</code> · slot {{.ActiveSlot}}{{else if .RuntimeChecked}}single-service Compose{{else if eq $d.UIEngine "portable"}}runtime neověřen{{else}}nenasazeno{{end}}</dd>
       <dt>Nasazeno</dt><dd>{{or .DeployedAt "—"}}</dd>
       <dt>Předchozí</dt><dd><code>{{or .Previous "—"}}</code></dd>
       <dt>Zdroj</dt><dd>{{if eq .Source "image"}}{{.Image}}{{else}}{{.Repo}} ({{.Branch}}) · build {{.Build}}{{end}}</dd>
@@ -44,10 +44,13 @@
     <h2>Akce</h2>
     <form method="post" action="/apps/{{.Name}}/action/deploy" class="stack">
       <input type="hidden" name="csrf" value="{{$.CSRF}}">
-      {{if ne .Source "image"}}<label>Větev / tag / commit <small>prázdné = {{.Branch}}</small><input name="ref" placeholder="{{.Branch}}"></label>
+      {{if ne .Source "image"}}<label>Větev / tag / commit <small>prázdné = poslední build{{if eq $d.UIEngine "portable"}}; zadaný ref se sestaví před přepnutím slotu{{end}}</small><input name="ref" value="{{or .Branch "main"}}" placeholder="{{or .Branch "main"}}"></label>
+      {{if ne $d.UIEngine "portable"}}
       <label class="inline"><input type="checkbox" name="migrate" value="1"> Spustit migrace (MIGRATE_CMD)</label>{{end}}
+      {{end}}
       <button class="primary">Deploy</button>
     </form>
+    {{if eq $d.UIEngine "portable"}}<p class="hint">Portable UI používá health-gated web-only blue/green deploy. Workery a automatické databázové migrace nejsou koordinovány; runtime stav se načítá v CLI.</p>{{end}}
     <div class="actions">
       {{range $a := (list "rollback" "apply" "restart" "start" "stop" "backup")}}
       <form method="post" action="/apps/{{$d.App.Name}}/action/{{$a}}" data-confirm="{{$a}}">
@@ -174,7 +177,7 @@
   </form>
   <form method="post" action="/apps/{{$d.App.Name}}/files/compose.override.yaml" id="f-override" class="subtab">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p class="hint">Další kontejnery, volumes nebo limity ve formátu Docker Compose; sloučí se s vygenerovanou konfigurací.</p>
+    <p class="hint">Další kontejnery, volumes nebo limity ve formátu Docker Compose; sloučí se s vygenerovanou konfigurací a ověří příkazem Compose config. Portable blue/green deploy/rollback override nepodporuje.</p>
     <textarea name="content" spellcheck="false" rows="24">{{index $d.Files "compose.override.yaml"}}</textarea>
     <button class="primary">Uložit override</button>
   </form>

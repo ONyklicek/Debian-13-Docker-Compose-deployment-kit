@@ -46,25 +46,34 @@ func TestAppGetSetAndEnvCommands(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := envCommand([]string{"list", "shop"}, configDir, &output); err != nil {
+	if err := setApp([]string{"shop", "-"}, configDir, &output, strings.NewReader("WEB_PORT=3100\n-HEALTH_PATH\n")); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := appCommand([]string{"get", "shop", "WEB_PORT"}, paths, &output); err != nil || strings.TrimSpace(output.String()) != "3100" {
+		t.Fatalf("app set stdin output=%q error=%v", output.String(), err)
+	}
+
+	output.Reset()
+	if err := envCommand([]string{"list", "shop"}, configDir, &output, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(output.String(), "secret") || !strings.Contains(output.String(), "DB_PASSWORD=•••••• (--show)") {
 		t.Fatalf("env list did not mask secret: %q", output.String())
 	}
 	output.Reset()
-	if err := envCommand([]string{"set", "shop", "APP_NAME=new app", "API_TOKEN=a$secret"}, configDir, &output); err != nil {
+	if err := envCommand([]string{"set", "shop", "APP_NAME=new app", "API_TOKEN=a$secret"}, configDir, &output, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
 	output.Reset()
-	if err := envCommand([]string{"list", "shop", "--show"}, configDir, &output); err != nil {
+	if err := envCommand([]string{"list", "shop", "--show"}, configDir, &output, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), "APP_NAME=new app") || !strings.Contains(output.String(), "API_TOKEN=a$secret") {
 		t.Fatalf("env show output = %q", output.String())
 	}
 	output.Reset()
-	if err := envCommand([]string{"unset", "shop", "API_TOKEN"}, configDir, &output); err != nil {
+	if err := envCommand([]string{"unset", "shop", "API_TOKEN"}, configDir, &output, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
 	values, err := os.ReadFile(filepath.Join(filepath.Dir(appEnv), "env"))
@@ -87,7 +96,7 @@ func TestConfigEditRejectsInvalidResultsAndMalformedArguments(t *testing.T) {
 	if err := appCommand([]string{"set", "shop", "DOMAINS=invalid"}, portable.Paths{Config: configDir}, &output); err == nil {
 		t.Fatal("app set accepted an invalid configuration")
 	}
-	if err := envCommand([]string{"set", "shop", "BAD-KEY=x"}, configDir, &output); err == nil {
+	if err := envCommand([]string{"set", "shop", "BAD-KEY=x"}, configDir, &output, strings.NewReader("")); err == nil {
 		t.Fatal("env set accepted an invalid key")
 	}
 	for _, args := range [][]string{

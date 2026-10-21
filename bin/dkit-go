@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+_self=$(readlink -f "${BASH_SOURCE[0]}")
+DKIT_ROOT="${DKIT_ROOT:-$(dirname "$(dirname "$_self")")}"
+export DKIT_ROOT
+export DKIT_CONFIG_DIR="${DKIT_CONFIG_DIR:-${DKIT_ETC:-/etc/dkit}}"
+export DKIT_STATE_DIR="${DKIT_STATE_DIR:-${DKIT_STATE:-/var/lib/dkit}}"
+
+exec "$DKIT_ROOT/libexec/dkit-go" "$@"

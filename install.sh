@@ -102,11 +102,14 @@ docker buildx version >/dev/null 2>&1 || die "Chybí Docker Buildx plugin."
 
 say "Instalace kitu do $DKIT_ROOT"
 for d in bin lib platform templates presets ui; do [[ -d "$SOURCE_DIR/$d" ]] || die "V balíčku chybí adresář $d."; done
+[[ -f "$SOURCE_DIR/go.mod" && -f "$SOURCE_DIR/go.sum" && -d "$SOURCE_DIR/cmd/dkit" && -d "$SOURCE_DIR/internal" ]] ||
+  die "V balíčku chybí zdrojové soubory portable Go CLI."
 install -d -m 0755 "$DKIT_ROOT"
 # Kit code is owned by the kit: replace it so upgrades are clean. Local template overrides belong
 # to $DKIT_ETC/templates/<name>/Dockerfile and survive upgrades.
 rsync -a --delete --exclude '.git' \
   --include '/bin/***' --include '/lib/***' --include '/platform/***' --include '/templates/***' \
+  --include '/cmd/***' --include '/internal/***' --include '/go.mod' --include '/go.sum' \
   --include '/presets/***' --include '/ui/***' --include '/examples/***' \
   --include '/VERSION' --include '/README.md' --include '/SECURITY-CHECKLIST.md' \
   --include '/dkit.env.example' --include '/backup.env.example' --exclude '*' \
@@ -115,6 +118,17 @@ chown -R root:root "$DKIT_ROOT"
 chmod -R go-w "$DKIT_ROOT"
 chmod 0755 "$DKIT_ROOT/bin/dkit"
 ln -sfn "$DKIT_ROOT/bin/dkit" /usr/local/bin/dkit
+
+say "Build portable Go CLI"
+cli_export_dir="$(mktemp -d)"
+trap 'rm -rf -- "$cli_export_dir"' EXIT
+docker buildx build --target cli-export --output "type=local,dest=$cli_export_dir" \
+  -f "$DKIT_ROOT/ui/Dockerfile" "$DKIT_ROOT"
+[[ -s "$cli_export_dir/dkit-go" ]] || die "Buildx neexportoval portable CLI."
+install -d -m 0755 "$DKIT_ROOT/libexec"
+install -m 0755 "$cli_export_dir/dkit-go" "$DKIT_ROOT/libexec/dkit-go"
+chmod 0755 "$DKIT_ROOT/bin/dkit-go"
+ln -sfn "$DKIT_ROOT/bin/dkit-go" /usr/local/bin/dkit-go
 
 say "Příprava konfigurace a dat (existující soubory se nemění)"
 install -d -m 0700 "$DKIT_ETC" "$DKIT_ETC/apps" "$DKIT_ETC/templates" "$DKIT_ETC/presets"
@@ -150,6 +164,7 @@ Další kroky:
   2. Otevřete web UI (dkit ui start) nebo přidejte aplikaci z CLI, např.:
        dkit app create shop --preset laravel --domain shop.firma.cz --repo git@github.com:firma/shop.git
      (presety: laravel, php, node, static, dockerfile, image)
+     Portable Go CLI je dostupné také jako: sudo dkit-go app list
   3. Pro soukromý repozitář vložte deploy key do $DKIT_ETC/apps/<app>/ssh/deploy_key
      a ověřený host key do $DKIT_ETC/apps/<app>/ssh/known_hosts.
   4. Nasaďte:  dkit deploy <app>

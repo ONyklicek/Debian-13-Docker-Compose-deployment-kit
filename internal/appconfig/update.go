@@ -48,6 +48,10 @@ func Rewrite(data []byte, set map[string]string, unset []string) ([]byte, error)
 	return mutate(data, set, unset, false)
 }
 
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	return atomicReplace(path, data, mode)
+}
+
 func ReadEnv(configDir, name string) (map[string]string, error) {
 	path, err := AppFilePath(configDir, name)
 	if err != nil {

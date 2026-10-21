@@ -2,6 +2,7 @@ package composegen
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -48,13 +49,136 @@ func TestRenderImageAppCompose(t *testing.T) {
 		`/apps/demo/env"`,
 		`mem_limit: "512m"`,
 		"no-new-privileges:true",
+		`dkit-demo-app`,
+		"name: dkit_edge",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("Compose output missing %q:\n%s", want, text)
 		}
 	}
+	if strings.Contains(text, "traefik.http.routers.dkit-demo-web") {
+		t.Fatalf("web route must be owned by the file provider, not Docker labels:\n%s", text)
+	}
 	if strings.Contains(text, "TOKEN=secret") {
 		t.Fatal("Compose output leaked environment values")
+	}
+}
+
+func TestRenderBlueGreenComposeUsesSlotProfilesAndSharedServices(t *testing.T) {
+	configDir, stateDir := t.TempDir(), t.TempDir()
+	writeConfig(t, configDir, imageApp+"SERVICES=postgres redis\nPERSIST=\"storage:/app/storage\"\n", "")
+	got, err := RenderBlueGreen(configDir, stateDir, "demo", "registry.example/demo:blue", "registry.example/demo:green")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	for _, expected := range []string{
+		`name: "dkit-demo"`,
+		`  web-blue:`,
+		`image: "registry.example/demo:blue"`,
+		`profiles: ["blue"]`,
+		`dkit-demo-web-blue`,
+		`  web-green:`,
+		`image: "registry.example/demo:green"`,
+		`profiles: ["green"]`,
+		`dkit-demo-web-green`,
+		`  health-probe-blue:`,
+		`http://web-blue:3000/`,
+		`  health-probe-green:`,
+		`http://web-green:3000/`,
+		`  postgres:`,
+		`  redis:`,
+		`postgres_data: {}`,
+		`redis_data: {}`,
+		`"persist_storage:/app/storage"`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("blue/green Compose output missing %q:\n%s", expected, text)
+		}
+	}
+	if strings.Count(text, "\n  postgres:\n") != 1 || strings.Count(text, "\n  redis:\n") != 1 {
+		t.Fatalf("shared services must be declared only once:\n%s", text)
+	}
+	if strings.Contains(text, "\n  app:\n") || strings.Contains(text, "\n  health-probe:\n") {
+		t.Fatalf("blue/green model unexpectedly includes single-service resources:\n%s", text)
+	}
+}
+
+func TestRenderBlueGreenRejectsWorkerAndPublishedPort(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, want string
+	}{
+		{"workers", "WORKERS=queue\nWORKER_queue_CMD=run-queue\n", "worker version coordination"},
+		{"published port", "PUBLISH_PORT=13000\n", "cannot bind the same host port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			writeConfig(t, configDir, imageApp+tc.extra, "")
+			_, err := RenderBlueGreen(configDir, t.TempDir(), "demo", "demo:blue", "demo:green")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("RenderBlueGreen() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderBlueGreenRejectsInvalidSlotImages(t *testing.T) {
+	configDir := t.TempDir()
+	writeConfig(t, configDir, imageApp, "")
+	for _, tc := range []struct{ blue, green string }{
+		{"", "demo:green"},
+		{"demo:blue", "demo\nmalicious"},
+		{"demo:$TAG", "demo:green"},
+	} {
+		if _, err := RenderBlueGreen(configDir, t.TempDir(), "demo", tc.blue, tc.green); err == nil {
+			t.Errorf("RenderBlueGreen() accepted images %#v", tc)
+		}
+	}
+}
+
+func TestRenderBlueGreenComposeConfig(t *testing.T) {
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("Docker CLI is unavailable")
+	}
+	configDir, stateDir := t.TempDir(), t.TempDir()
+	writeConfig(t, configDir, imageApp+"SERVICES=postgres redis\n", "")
+	serviceDir := filepath.Join(configDir, "apps", "demo")
+	if err := os.WriteFile(filepath.Join(serviceDir, "services.env"), []byte("POSTGRES_PASSWORD=test-password\nREDIS_PASSWORD=test-password\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := filepath.Join(stateDir, "apps", "demo")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "runtime.env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model, err := RenderBlueGreen(configDir, stateDir, "demo", "demo:blue", "demo:green")
+	if err != nil {
+		t.Fatal(err)
+	}
+	composePath := filepath.Join(t.TempDir(), "compose.yaml")
+	if err := os.WriteFile(composePath, model, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(docker, "compose", "--env-file", filepath.Join(serviceDir, "services.env"), "-f", composePath, "config", "--quiet")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("docker compose config rejected the generated blue/green model: %v\n%s", err, output)
+	}
+	for _, tc := range []struct{ profile, active, inactive string }{
+		{"blue", "web-blue", "web-green"},
+		{"green", "web-green", "web-blue"},
+	} {
+		cmd := exec.Command(docker, "compose", "--profile", tc.profile, "--env-file", filepath.Join(serviceDir, "services.env"), "-f", composePath, "config", "--services")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker compose could not resolve %s profile: %v\n%s", tc.profile, err, output)
+		}
+		services := "\n" + string(output) + "\n"
+		if !strings.Contains(services, "\n"+tc.active+"\n") || strings.Contains(services, "\n"+tc.inactive+"\n") {
+			t.Fatalf("%s profile services = %q; want %s without %s", tc.profile, output, tc.active, tc.inactive)
+		}
 	}
 }
 
@@ -93,7 +217,6 @@ func TestRenderRejectsUnsupportedOrUnsafeConfig(t *testing.T) {
 	}{
 		{"git source", "DOMAINS=demo.example.com\nSOURCE=git\nGIT_REPOSITORY=https://example.com/repo.git\n", "no portable Git build"},
 		{"s3", imageApp + "SERVICES=s3\n", "S3 service provisioning"},
-		{"worker route", imageApp + "WORKERS=websocket\nWORKER_websocket_CMD=run\nWORKER_websocket_PORT=8081\nWORKER_websocket_PATH=/socket\n", "worker routes"},
 		{"persistence owner", imageApp + "PERSIST=data:/data\nPERSIST_OWNER=1000:1000\n", "ownership changes"},
 		{"health timeout", imageApp + "HEALTH_TIMEOUT=999\n", "from 1 to 240 seconds"},
 		{"unsafe image", strings.Replace(imageApp, "ghcr.io/example/demo:1.2", "image\tmalicious", 1), "invalid IMAGE"},
@@ -107,6 +230,56 @@ func TestRenderRejectsUnsupportedOrUnsafeConfig(t *testing.T) {
 				t.Fatalf("Render error = %v, want text %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestRenderPublicRoutesForAppAndPathWorkers(t *testing.T) {
+	configDir := t.TempDir()
+	appEnv := `DOMAINS=demo.example.com, www.demo.example.com
+SOURCE=image
+IMAGE=ghcr.io/example/demo:1.2
+WEB_PORT=3000
+HEALTH_PATH=/ready
+WORKERS=websocket
+WORKER_websocket_CMD=node server.js
+WORKER_websocket_PORT=8081
+WORKER_websocket_PATH=/socket
+`
+	writeConfig(t, configDir, appEnv, "")
+	got, err := Render(configDir, t.TempDir(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	for _, expected := range []string{
+		"traefik.http.routers.dkit-demo-websocket.rule=(Host(`demo.example.com`) || Host(`www.demo.example.com`)) \\u0026\\u0026 PathPrefix(`/socket`)",
+		`traefik.http.routers.dkit-demo-websocket.priority=10000`,
+		`traefik.http.services.dkit-demo-websocket.loadbalancer.server.port=8081`,
+		`dkit-demo-app`,
+		`name: dkit_edge`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("Compose output missing route setting %q:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, `traefik.http.services.dkit-demo-websocket.loadbalancer.healthcheck.`) {
+		t.Fatal("worker route should not assume that its public path supports HTTP health checks")
+	}
+}
+
+func TestRenderPublicZeroOmitsEdgeNetworkAndTraefikLabels(t *testing.T) {
+	configDir := t.TempDir()
+	writeConfig(t, configDir, "PUBLIC=0\nSOURCE=image\nIMAGE=ghcr.io/example/internal:1.2\n", "")
+	got, err := Render(configDir, t.TempDir(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if strings.Contains(text, "traefik.") || strings.Contains(text, "dkit_edge") {
+		t.Fatalf("PUBLIC=0 Compose model unexpectedly enabled public routing:\n%s", text)
+	}
+	if !strings.Contains(text, "internal: true") {
+		t.Fatalf("PUBLIC=0 model lost its private backend network:\n%s", text)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appconfig"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/applock"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/buildinfo"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/composegen"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/portable"
@@ -28,33 +29,23 @@ func buildApp(args []string, paths portable.Paths) (returnErr error) {
 	if !appconfig.ValidName(name) {
 		return fmt.Errorf("invalid app name %q", name)
 	}
-	app, err := appconfig.Read(paths.Config, name)
-	if err != nil {
-		return err
-	}
-	if !app.Valid {
-		return fmt.Errorf("app %q configuration is invalid: %s", name, strings.Join(app.Errors, "; "))
-	}
-	if app.Values["SOURCE"] != "git" {
-		return fmt.Errorf("app %q uses SOURCE=%s; `dkit app build` is for Git apps", name, app.Values["SOURCE"])
-	}
 	if paths.State == "" {
 		return fmt.Errorf("state directory is not configured")
 	}
-	repository := app.Values["GIT_REPOSITORY"]
-	repoURL, err := url.Parse(repository)
-	if err != nil || repoURL.Scheme != "https" || repoURL.Host == "" || repoURL.User != nil {
-		return fmt.Errorf("portable Git build requires an HTTPS repository URL without embedded credentials; SSH/private repository authentication is not supported yet")
+	_, _, _, err := buildConfiguration(paths.Config, name, args)
+	if err != nil {
+		return err
 	}
-	ref := app.Values["GIT_BRANCH"]
-	if len(args) == 3 {
-		ref = args[2]
+	lock, err := applock.Acquire(paths.State, name)
+	if err != nil {
+		return err
 	}
-	if ref == "" {
-		ref = "main"
-	}
-	if !validGitRef(ref) {
-		return fmt.Errorf("invalid Git ref %q", ref)
+	defer func() {
+		returnErr = errors.Join(returnErr, applock.Release(name, lock))
+	}()
+	app, repository, ref, err := buildConfiguration(paths.Config, name, args)
+	if err != nil {
+		return err
 	}
 	if err := composegen.Prepare(paths.Config, paths.State, name); err != nil {
 		return err
@@ -171,6 +162,35 @@ func buildApp(args []string, paths portable.Paths) (returnErr error) {
 	keepCheckout = false
 	fmt.Printf("Built %s from %s at %s. No deployment was performed.\n", image, repository, revision)
 	return nil
+}
+
+func buildConfiguration(configDir, name string, args []string) (appconfig.App, string, string, error) {
+	app, err := appconfig.Read(configDir, name)
+	if err != nil {
+		return appconfig.App{}, "", "", err
+	}
+	if !app.Valid {
+		return appconfig.App{}, "", "", fmt.Errorf("app %q configuration is invalid: %s", name, strings.Join(app.Errors, "; "))
+	}
+	if app.Values["SOURCE"] != "git" {
+		return appconfig.App{}, "", "", fmt.Errorf("app %q uses SOURCE=%s; `dkit app build` is for Git apps", name, app.Values["SOURCE"])
+	}
+	repository := app.Values["GIT_REPOSITORY"]
+	repoURL, err := url.Parse(repository)
+	if err != nil || repoURL.Scheme != "https" || repoURL.Host == "" || repoURL.User != nil {
+		return appconfig.App{}, "", "", fmt.Errorf("portable Git build requires an HTTPS repository URL without embedded credentials; SSH/private repository authentication is not supported yet")
+	}
+	ref := app.Values["GIT_BRANCH"]
+	if len(args) == 3 {
+		ref = args[2]
+	}
+	if ref == "" {
+		ref = "main"
+	}
+	if !validGitRef(ref) {
+		return appconfig.App{}, "", "", fmt.Errorf("invalid Git ref %q", ref)
+	}
+	return app, repository, ref, nil
 }
 
 func resolveBuildDockerfile(app appconfig.App, configDir, root, checkout, tempDir string) (string, func() error, error) {

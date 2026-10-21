@@ -16,16 +16,17 @@
     {{end}}
   </div>
 </div>
+{{if eq .Data.UIEngine "portable"}}<p class="hint">Hromadné akce probíhají postupně po aplikacích. Zálohy mohou selhat u typů aplikací, které portable CLI nepodporuje; výsledek každé aplikace je v logu úlohy.</p>{{end}}
 <div class="tablewrap">
 <table class="list apps" id="apps">
   <thead><tr><th>Aplikace</th><th>Domény</th><th>Stav</th><th>Verze</th><th>Služby</th><th>Nasazeno</th></tr></thead>
   <tbody>
   {{range .Data.Apps}}
-    {{$st := "none"}}{{if .Error}}{{$st = "warn"}}{{else if .ActiveSlot}}{{if gt .Running 0}}{{$st = "ok"}}{{else}}{{$st = "warn"}}{{end}}{{end}}
+    {{$st := "none"}}{{if .Error}}{{$st = "warn"}}{{else if .RuntimeChecked}}{{if gt .Running 0}}{{$st = "ok"}}{{else}}{{$st = "warn"}}{{end}}{{else if eq $.Data.UIEngine "portable"}}{{$st = "warn"}}{{else if .ActiveSlot}}{{if gt .Running 0}}{{$st = "ok"}}{{else}}{{$st = "warn"}}{{end}}{{end}}
     <tr data-state="{{$st}}" data-search="{{.Name}} {{join .Domains " "}} {{join .Services " "}} {{.Build}} {{.Image}}">
       <td><a href="/apps/{{.Name}}"><strong>{{.Name}}</strong></a></td>
       <td class="domains">{{range .Domains}}<a href="https://{{.}}" target="_blank" rel="noopener">{{.}}</a> {{end}}</td>
-      <td>{{if .Error}}<span class="badge err">{{.Error}}</span>{{else if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else}}<span class="badge warn">nenasazeno</span>{{end}}</td>
+      <td>{{if .Error}}<span class="badge err">{{.Error}}</span>{{else if .RuntimeChecked}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else if eq $.Data.UIEngine "portable"}}<span class="badge">runtime neověřen</span>{{else if .ActiveSlot}}<span class="badge {{if gt .Running 0}}ok{{else}}warn{{end}}">{{.Running}}/{{len .Containers}} běží</span>{{else}}<span class="badge warn">nenasazeno</span>{{end}}</td>
       <td><code>{{short .Revision}}</code></td>
       <td class="muted">{{join .Services ", "}} {{if .Shared}}<small>(sdílené: {{join .Shared ", "}})</small>{{end}}</td>
       <td class="muted">{{or .DeployedAt "—"}}</td>

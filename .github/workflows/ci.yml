@@ -49,7 +49,7 @@ jobs:
         run: |
           mkdir -p /tmp/ctx
           for t in php node static; do docker buildx build --check -f templates/$t/Dockerfile /tmp/ctx; done
-          docker buildx build --check ui
+          docker buildx build --check -f ui/Dockerfile .
       - name: Compose
         run: |
           printf 'ACME_EMAIL=ci@example.org\n' > /tmp/dkit.env

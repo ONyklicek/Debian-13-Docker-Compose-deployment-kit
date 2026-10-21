@@ -41,7 +41,8 @@ var (
 	dkitEtc   = env("DKIT_ETC", "/etc/dkit")
 	dkitState = env("DKIT_STATE", "/var/lib/dkit")
 	listen    = env("DKIT_UI_LISTEN", ":9000")
-	dkitBin   = filepath.Join(dkitRoot, "bin", "dkit")
+	dkitBin   = env("DKIT_BIN", filepath.Join(dkitRoot, "bin", "dkit"))
+	uiEngine  = env("DKIT_UI_ENGINE", "legacy")
 
 	appNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 	refRe     = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
@@ -164,23 +165,25 @@ func (s *jobStore) list(app string, limit int) []Job {
 }
 
 func (s *jobStore) start(app, title string, args ...string) (string, error) {
+	return s.startSequence(app, title, [][]string{args})
+}
+
+func (s *jobStore) startSequence(app, title string, commands [][]string) (string, error) {
+	if len(commands) == 0 {
+		return "", errors.New("job has no commands")
+	}
+	if _, err := exec.LookPath(dkitBin); err != nil {
+		return "", fmt.Errorf("find dkit CLI %q: %w", dkitBin, err)
+	}
 	if err := os.MkdirAll(jobDir(), 0o700); err != nil {
 		return "", err
 	}
 	rb := make([]byte, 3)
 	_, _ = rand.Read(rb)
 	j := &Job{ID: time.Now().UTC().Format("20060102T150405") + "-" + hex.EncodeToString(rb),
-		App: app, Title: title, Args: args, Started: time.Now(), Running: true}
+		App: app, Title: title, Args: append([]string(nil), commands[0]...), Started: time.Now(), Running: true}
 	logf, err := os.OpenFile(filepath.Join(jobDir(), j.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return "", err
-	}
-	fmt.Fprintf(logf, "$ dkit %s\n", strings.Join(args, " "))
-	cmd := exec.Command(dkitBin, args...)
-	cmd.Env = append(os.Environ(), "DKIT_YES=1", "TERM=dumb")
-	cmd.Stdout, cmd.Stderr = logf, logf
-	if err := cmd.Start(); err != nil {
-		logf.Close()
 		return "", err
 	}
 	s.mu.Lock()
@@ -188,15 +191,29 @@ func (s *jobStore) start(app, title string, args ...string) (string, error) {
 	s.save(j)
 	s.mu.Unlock()
 	go func() {
-		err := cmd.Wait()
 		code := 0
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		} else if err != nil {
-			code = -1
+		for _, args := range commands {
+			fmt.Fprintf(logf, "$ dkit %s\n", strings.Join(args, " "))
+			cmd := exec.Command(dkitBin, args...)
+			cmd.Env = dkitCommandEnv("DKIT_YES=1", "TERM=dumb")
+			cmd.Stdout, cmd.Stderr = logf, logf
+			err := cmd.Run()
+			commandCode := 0
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				commandCode = ee.ExitCode()
+			} else if err != nil {
+				commandCode = -1
+			}
+			if err != nil {
+				fmt.Fprintf(logf, "[chyba: %v]\n", err)
+			}
+			fmt.Fprintf(logf, "[ukončeno s kódem %d]\n", commandCode)
+			if commandCode != 0 {
+				code = 1
+			}
 		}
-		fmt.Fprintf(logf, "\n[ukončeno s kódem %d]\n", code)
+		fmt.Fprintf(logf, "\n[úloha ukončena s kódem %d]\n", code)
 		logf.Close()
 		s.mu.Lock()
 		j.Running, j.Exit, j.Ended = false, code, time.Now()
@@ -234,22 +251,26 @@ type Container struct {
 }
 
 type App struct {
-	Name       string      `json:"name"`
-	Error      string      `json:"error"`
-	Domains    []string    `json:"domains"`
-	Source     string      `json:"source"`
-	Repo       string      `json:"repo"`
-	Branch     string      `json:"branch"`
-	Image      string      `json:"image"`
-	Build      string      `json:"build"`
-	Services   []string    `json:"services"`
-	Shared     []string    `json:"shared"`
-	Workers    []string    `json:"workers"`
-	ActiveSlot string      `json:"active_slot"`
-	Revision   string      `json:"revision"`
-	Previous   string      `json:"previous_revision"`
-	DeployedAt string      `json:"deployed_at"`
-	Containers []Container `json:"containers"`
+	Name           string      `json:"name"`
+	Error          string      `json:"error"`
+	Valid          bool        `json:"valid"`
+	Errors         []string    `json:"errors"`
+	RuntimeChecked bool        `json:"runtime_checked"`
+	ConfigValid    bool        `json:"config_valid"`
+	Domains        []string    `json:"domains"`
+	Source         string      `json:"source"`
+	Repo           string      `json:"repo"`
+	Branch         string      `json:"branch"`
+	Image          string      `json:"image"`
+	Build          string      `json:"build"`
+	Services       []string    `json:"services"`
+	Shared         []string    `json:"shared"`
+	Workers        []string    `json:"workers"`
+	ActiveSlot     string      `json:"active_slot"`
+	Revision       string      `json:"revision"`
+	Previous       string      `json:"previous_revision"`
+	DeployedAt     string      `json:"deployed_at"`
+	Containers     []Container `json:"containers"`
 }
 
 func (a App) Running() int {
@@ -271,7 +292,7 @@ func runDkitIn(stdin string, timeout time.Duration, args ...string) ([]byte, err
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, dkitBin, args...)
-	cmd.Env = append(os.Environ(), "DKIT_YES=1", "TERM=dumb")
+	cmd.Env = dkitCommandEnv("DKIT_YES=1", "TERM=dumb")
 	cmd.Stdin = strings.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -282,13 +303,53 @@ func runDkitIn(stdin string, timeout time.Duration, args ...string) ([]byte, err
 	return out, nil
 }
 
+func dkitCommandEnv(extra ...string) []string {
+	env := append([]string(nil), os.Environ()...)
+	for _, value := range append([]string{
+		"DKIT_ROOT=" + dkitRoot,
+		"DKIT_ETC=" + dkitEtc,
+		"DKIT_STATE=" + dkitState,
+		"DKIT_CONFIG_DIR=" + dkitEtc,
+		"DKIT_STATE_DIR=" + dkitState,
+	}, extra...) {
+		key, _, _ := strings.Cut(value, "=")
+		prefix := key + "="
+		filtered := env[:0]
+		for _, current := range env {
+			if !strings.HasPrefix(current, prefix) {
+				filtered = append(filtered, current)
+			}
+		}
+		env = append(filtered, value)
+	}
+	return env
+}
+
+func portableUI() bool { return uiEngine == "portable" }
+
 func listApps() ([]App, error) {
 	out, err := runDkit(30*time.Second, "apps", "--json")
 	if err != nil {
 		return nil, err
 	}
 	var apps []App
-	return apps, json.Unmarshal(out, &apps)
+	if err := json.Unmarshal(out, &apps); err != nil {
+		return nil, err
+	}
+	for i := range apps {
+		if apps[i].Error == "" && len(apps[i].Errors) != 0 {
+			apps[i].Error = strings.Join(apps[i].Errors, "; ")
+		}
+		if portableUI() {
+			details, detailErr := getApp(apps[i].Name)
+			if detailErr != nil {
+				apps[i].Error = detailErr.Error()
+				continue
+			}
+			apps[i] = details
+		}
+	}
+	return apps, nil
 }
 
 func getApp(name string) (App, error) {
@@ -297,10 +358,50 @@ func getApp(name string) (App, error) {
 	if err != nil {
 		return a, err
 	}
-	return a, json.Unmarshal(out, &a)
+	if err := json.Unmarshal(out, &a); err != nil {
+		return a, err
+	}
+	if portableUI() {
+		composePath := filepath.Join(dkitState, "apps", name, "compose.yaml")
+		info, err := os.Lstat(composePath)
+		if os.IsNotExist(err) {
+			return a, nil
+		}
+		if err != nil {
+			return a, fmt.Errorf("inspect Compose model for app %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return a, fmt.Errorf("Compose model for app %s is not a regular file", name)
+		}
+		a.RuntimeChecked = true
+		ps, err := runDkit(30*time.Second, "app", "compose", "ps", name, "--json")
+		if err != nil {
+			a.Error = "Runtime status unavailable: " + err.Error()
+			return a, nil
+		}
+		var statuses []struct {
+			Service string `json:"Service"`
+			State   string `json:"State"`
+			Status  string `json:"Status"`
+		}
+		if err := json.Unmarshal(ps, &statuses); err != nil {
+			return a, fmt.Errorf("parse Compose status for app %s: %w", name, err)
+		}
+		for _, status := range statuses {
+			a.Containers = append(a.Containers, Container{Service: status.Service, State: status.State, Status: status.Status})
+		}
+	}
+	return a, nil
 }
 
 func traefikState() string {
+	if portableUI() {
+		out, err := runDkit(10*time.Second, "docker", "inspect", "-f", "{{.State.Status}}", "dkit-traefik")
+		if err != nil {
+			return "nenalezen"
+		}
+		return strings.TrimSpace(string(out))
+	}
 	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "dkit-traefik").Output()
 	if err != nil {
 		return "nenalezen"
@@ -433,7 +534,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	apps, err := listApps()
 	p := page{Title: "Aplikace", Section: "apps", Data: map[string]any{
-		"Apps": apps, "Traefik": traefikState(), "Jobs": jobs.list("", 8),
+		"Apps": apps, "Traefik": traefikState(), "Jobs": jobs.list("", 8), "UIEngine": uiEngine,
 	}}
 	if err != nil {
 		p.Error = err.Error()
@@ -442,7 +543,12 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleNew(w http.ResponseWriter, r *http.Request) {
-	data := map[string]any{"Presets": listPresets(), "Services": services}
+	presets, err := listPresets()
+	data := map[string]any{"Presets": presets, "Services": services}
+	if err != nil {
+		render(w, r, "new.html", page{Title: "Nová aplikace", Section: "new", Data: data, Error: err.Error()})
+		return
+	}
 	if r.Method == http.MethodGet {
 		render(w, r, "new.html", page{Title: "Nová aplikace", Section: "new", Data: data})
 		return
@@ -495,20 +601,37 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 	}
 	files := map[string]string{}
 	for f := range editable {
-		b, _ := os.ReadFile(appFile(name, f))
+		b, readErr := os.ReadFile(appFile(name, f))
+		if readErr != nil && !os.IsNotExist(readErr) {
+			render(w, r, "error.html", page{Title: name, Error: readErr.Error()})
+			return
+		}
 		files[f] = string(b)
 	}
-	cfg, _ := getJSONMap("app", "get", name, "--json")
-	env, _ := getJSONMap("env", "list", name, "--json")
+	cfg, err := getJSONMap("app", "get", name, "--json")
+	if err != nil {
+		render(w, r, "error.html", page{Title: name, Error: err.Error()})
+		return
+	}
+	env, err := getJSONMap("env", "list", name, "--json")
+	if err != nil {
+		render(w, r, "error.html", page{Title: name, Error: err.Error()})
+		return
+	}
+	options, err := buildOptions()
+	if err != nil {
+		render(w, r, "error.html", page{Title: name, Error: err.Error()})
+		return
+	}
 	tab := r.URL.Query().Get("tab")
 	if tab == "" {
 		tab = "overview"
 	}
 	render(w, r, "app.html", page{Title: name, Section: "apps", Data: map[string]any{
 		"App": a, "Files": files, "Jobs": jobs.list(name, 10), "Tab": tab,
-		"Groups": appGroups, "Config": cfg, "BuildOptions": buildOptions(), "Workers": workersOf(cfg),
+		"Groups": appGroups, "Config": cfg, "BuildOptions": options, "Workers": workersOf(cfg),
 		"Env":       envVars(env),
-		"Shareable": []string{"mariadb", "postgres", "s3"},
+		"Shareable": []string{"mariadb", "postgres", "s3"}, "UIEngine": uiEngine,
 	}})
 }
 
@@ -521,6 +644,10 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 	}
 	path := appFile(name, file)
 	old, oldErr := os.ReadFile(path)
+	if oldErr != nil && !os.IsNotExist(oldErr) {
+		redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Načtení původního souboru selhalo: "+oldErr.Error()))
+		return
+	}
 	content := strings.ReplaceAll(r.FormValue("content"), "\r\n", "\n")
 	if content != "" && !strings.HasSuffix(content, "\n") {
 		content += "\n"
@@ -529,16 +656,44 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Uložení selhalo: "+err.Error()))
 		return
 	}
-	if out, err := runDkit(2*time.Minute, "app", "check", name); err != nil {
-		if oldErr == nil {
-			_ = writeAtomic(path, old, mode)
+	checkArgs := []string{"app", "check", name}
+	if file == "env" {
+		checkArgs = []string{"env", "list", name, "--json"}
+	} else if file == "compose.override.yaml" {
+		if _, err := runDkit(2*time.Minute, "app", "compose", "render", name, "--write"); err == nil {
+			checkArgs = []string{"app", "compose", "config", name}
 		} else {
-			os.Remove(path)
+			checkArgs = nil
+			out := []byte(err.Error())
+			if restoreErr := restoreEditedFile(path, old, oldErr, mode); restoreErr != nil {
+				redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Generování Compose modelu selhalo a původní soubor se nepodařilo obnovit: "+restoreErr.Error()))
+				return
+			}
+			redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Compose model se nepodařilo vygenerovat; změna byla vrácena: "+string(out)))
+			return
+		}
+	}
+	if out, err := runDkit(2*time.Minute, checkArgs...); err != nil {
+		restoreErr := restoreEditedFile(path, old, oldErr, mode)
+		if restoreErr != nil {
+			redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Kontrola selhala a původní soubor se nepodařilo obnovit: "+restoreErr.Error()))
+			return
 		}
 		redirect(w, r, "/apps/"+name+"?tab=advanced&err="+urlq("Konfigurace neprošla kontrolou, změna vrácena: "+err.Error()+" "+string(out)))
 		return
 	}
 	redirect(w, r, "/apps/"+name+"?tab=advanced&ok="+urlq(file+" uložen. Projeví se po „Použít konfiguraci“ nebo dalším deployi."))
+}
+
+func restoreEditedFile(path string, old []byte, oldErr error, mode os.FileMode) error {
+	if oldErr == nil {
+		return writeAtomic(path, old, mode)
+	}
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
@@ -580,27 +735,58 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	args := []string{action, name}
-	switch action {
-	case "deploy":
-		if ref := strings.TrimSpace(r.FormValue("ref")); ref != "" {
-			if !refRe.MatchString(ref) {
-				redirect(w, r, "/apps/"+name+"?err=Neplatná+ref")
+	var args []string
+	if portableUI() {
+		switch action {
+		case "deploy", "rollback", "apply", "start", "stop", "restart":
+			args = []string{"app", "compose", action, name}
+			if action == "deploy" {
+				if r.FormValue("migrate") == "1" {
+					redirect(w, r, "/apps/"+name+"?err="+urlq("Portable blue/green deploy nepodporuje automatické migrace; spusťte je samostatně po ověření kompatibility databázové změny."))
+					return
+				}
+				if ref := strings.TrimSpace(r.FormValue("ref")); ref != "" {
+					if !refRe.MatchString(ref) {
+						redirect(w, r, "/apps/"+name+"?err=Neplatná+ref")
+						return
+					}
+					args = append(args, "--ref", ref)
+				}
+			}
+		case "backup":
+			args = []string{"backup", name}
+		case "remove":
+			args = []string{"app", "remove", name, "--yes"}
+		case "purge":
+			if r.FormValue("confirm") != name {
+				redirect(w, r, "/apps/"+name+"?err="+urlq("Pro smazání opište přesně jméno aplikace."))
 				return
 			}
-			args = append(args, "--ref", ref)
+			args = []string{"app", "remove", name, "--yes", "--purge"}
 		}
-		if r.FormValue("migrate") == "1" {
-			args = append(args, "--migrate")
+	} else {
+		args = []string{action, name}
+		switch action {
+		case "deploy":
+			if ref := strings.TrimSpace(r.FormValue("ref")); ref != "" {
+				if !refRe.MatchString(ref) {
+					redirect(w, r, "/apps/"+name+"?err=Neplatná+ref")
+					return
+				}
+				args = append(args, "--ref", ref)
+			}
+			if r.FormValue("migrate") == "1" {
+				args = append(args, "--migrate")
+			}
+		case "remove":
+			args = []string{"app", "remove", name}
+		case "purge":
+			if r.FormValue("confirm") != name {
+				redirect(w, r, "/apps/"+name+"?err="+urlq("Pro smazání opište přesně jméno aplikace."))
+				return
+			}
+			args = []string{"app", "remove", name, "--purge"}
 		}
-	case "remove":
-		args = []string{"app", "remove", name}
-	case "purge":
-		if r.FormValue("confirm") != name {
-			redirect(w, r, "/apps/"+name+"?err="+urlq("Pro smazání opište přesně jméno aplikace."))
-			return
-		}
-		args = []string{"app", "remove", name, "--purge"}
 	}
 	id, err := jobs.start(name, title+" "+name, args...)
 	if err != nil {
@@ -617,6 +803,43 @@ func handleBulk(w http.ResponseWriter, r *http.Request) {
 	title, ok := bulkActions[action]
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if portableUI() {
+		apps, err := listApps()
+		if err != nil {
+			redirect(w, r, "/?err="+urlq(err.Error()))
+			return
+		}
+		var commands [][]string
+		for _, app := range apps {
+			switch action {
+			case "deploy":
+				command := []string{"app", "compose", "deploy", app.Name}
+				if app.Source == "git" {
+					ref := app.Branch
+					if ref == "" {
+						ref = "main"
+					}
+					command = append(command, "--ref", ref)
+				}
+				commands = append(commands, command)
+			case "apply":
+				commands = append(commands, []string{"app", "compose", "apply", app.Name})
+			case "backup":
+				commands = append(commands, []string{"backup", app.Name})
+			}
+		}
+		if len(commands) == 0 {
+			redirect(w, r, "/?err="+urlq("Nejsou nastavené žádné aplikace."))
+			return
+		}
+		id, err := jobs.startSequence("", title, commands)
+		if err != nil {
+			redirect(w, r, "/?err="+urlq(err.Error()))
+			return
+		}
+		redirect(w, r, "/jobs/"+id)
 		return
 	}
 	id, err := jobs.start("", title, action, "--all")
@@ -715,6 +938,7 @@ func main() {
 	mux.HandleFunc("POST /presets/{name}", withAuth(handlePreset))
 	mux.HandleFunc("GET /templates/{name}", withAuth(handleTemplate))
 	mux.HandleFunc("POST /templates/{name}", withAuth(handleTemplate))
+	mux.HandleFunc("POST /templates/create", withAuth(handleTemplateCreate))
 	mux.HandleFunc("GET /jobs", withAuth(handleJobs))
 	mux.HandleFunc("GET /jobs/{id}", withAuth(handleJob))
 	mux.HandleFunc("GET /jobs/{id}/raw", withAuth(handleJobRaw))

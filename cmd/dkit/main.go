@@ -5,26 +5,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appclone"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appconfig"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appcreate"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/applock"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/composegen"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/composehistory"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/deploymentstate"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/portable"
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/presetcatalog"
+	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/traefikroute"
+	buildtemplates "github.com/onyklicek/debian-13-docker-compose-deployment-kit/templates"
 )
 
 type settings struct {
 	DockerContext string `json:"docker_context,omitempty"`
 }
+
+var regexpDomain = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+var templateNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,30}$`)
+var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -45,7 +57,7 @@ func run(args []string) error {
 	case "help", "-h", "--help":
 		return usage()
 	case "version", "--version":
-		fmt.Println("dkit portable CLI (development build)")
+		fmt.Println("dkit portable CLI", version)
 		return nil
 	case "paths":
 		return printPaths(args[1:], paths)
@@ -65,7 +77,9 @@ func run(args []string) error {
 	case "apps", "ls":
 		return listApps(args[1:], paths.Config, os.Stdout)
 	case "env":
-		return envCommand(args[1:], paths.Config, os.Stdout)
+		return envCommand(args[1:], paths.Config, os.Stdout, os.Stdin)
+	case "config":
+		return configCommand(args[1:], paths.Config, os.Stdout, os.Stdin)
 	case "domain", "domains":
 		return domainCommand(args[1:], paths.Config, os.Stdout)
 	case "worker", "workers":
@@ -80,6 +94,8 @@ func run(args []string) error {
 		return backupCommand(args[1:], paths)
 	case "preset":
 		return presetCommand(args[1:], paths.Config, os.Stdout)
+	case "template", "templates":
+		return templateCommand(args[1:], paths.Config, os.Stdout)
 	case "doctor":
 		return doctor(paths)
 	default:
@@ -106,8 +122,10 @@ Portable commands:
   dkit app show <name> [--json]       show app config without querying runtime
   dkit app check <name> [--json]      validate app.env settings without Docker
   dkit app compose render <name> [--write] render a supported app Compose model
-  dkit app compose <config|apply|up|down|start|stop|restart|ps|health|rollback|logs|exec> <name>
+  dkit app compose <config|apply|up|deploy|down|start|stop|restart|ps|health|rollback|logs|exec> <name>
                                       manage a rendered app Compose project
+  dkit app compose deploy <name> [--ref <git-ref>]
+                                      health-gated web-only blue/green deploy; --ref builds a Git revision first
   dkit domain <list|add|remove> <app> [domain...]
                                       manage app domains in app.env
   dkit worker <list|add|remove> <app> [worker] [options]
@@ -117,11 +135,15 @@ Portable commands:
   dkit env list <name> [--show|--json] read app environment (secrets masked by default)
   dkit env set <name> KEY=VALUE...   update app environment
   dkit env unset <name> <key...>     remove app environment keys
+  dkit env replace <name>            replace app environment from KEY=VALUE stdin
+  dkit config get [key|--json]        read global dkit.env settings
+  dkit config set KEY=VALUE...        update global settings (or use stdin '-')
   dkit db shell|dump|import|migrate <name> manage an app's dedicated database
   dkit logs <name> [service...] [-f] [--tail N] show logs for a rendered app
   dkit exec <name> [service] [-- command...] execute in a rendered app service
   dkit backup <name> | backup list [name] | backup restore <name> [snapshot] --target <dir>
-  dkit preset list [--json]           list built-in and user presets
+  dkit preset list|create|remove      list and manage user presets
+  dkit template list|reset            list templates and reset a local override
   dkit doctor                         check Docker CLI, Compose, and daemon
 
 Existing deployment commands are forwarded to the bundled Bash engine on
@@ -333,7 +355,7 @@ func appCommand(args []string, paths portable.Paths, output io.Writer) error {
 	case "get":
 		return getApp(args[1:], paths.Config, output)
 	case "set":
-		return setApp(args[1:], paths.Config, output)
+		return setApp(args[1:], paths.Config, output, os.Stdin)
 	default:
 		return runLegacy(append([]string{"app"}, args...), paths)
 	}
@@ -375,9 +397,9 @@ func cloneApp(args []string, configDir string, output io.Writer) error {
 	return err
 }
 
-func appComposeCommand(args []string, paths portable.Paths, output io.Writer) error {
+func appComposeCommand(args []string, paths portable.Paths, output io.Writer) (returnErr error) {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: dkit app compose render <name> [--write] | <config|apply|up|down|start|stop|restart|ps|health|rollback|logs|exec> <name>")
+		return fmt.Errorf("usage: dkit app compose render <name> [--write] | <config|apply|up|deploy|down|start|stop|restart|ps|health|rollback|logs|exec> <name>")
 	}
 	if args[0] != "render" {
 		return appComposeOperation(args[0], args[1], args[2:], paths, output)
@@ -390,39 +412,70 @@ func appComposeCommand(args []string, paths portable.Paths, output io.Writer) er
 		if paths.State == "" {
 			return fmt.Errorf("state directory is not configured")
 		}
-		if err := composegen.Prepare(paths.Config, paths.State, name); err != nil {
+		lock, err := applock.Acquire(paths.State, name)
+		if err != nil {
 			return err
 		}
+		defer func() {
+			returnErr = errors.Join(returnErr, applock.Release(name, lock))
+		}()
+		state, err := deploymentstate.Load(paths.State, name)
+		if err != nil {
+			return err
+		}
+		if state.ActiveSlot != "" {
+			return fmt.Errorf("app %q uses blue/green slots; use `dkit app compose deploy %s` or rollback before changing its single-service Compose model", name, name)
+		}
+		path, err := writeAppComposeModel(name, paths)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(output, "Wrote Compose model to %s. No Docker operations were performed.\n", path)
+		return err
 	}
 	compose, err := composegen.Render(paths.Config, paths.State, name)
 	if err != nil {
-		return err
-	}
-	if len(args) == 3 {
-		path := filepath.Join(paths.State, "apps", name, "compose.yaml")
-		if err := composehistory.WriteRendered(paths.State, name, compose); err != nil {
-			return err
-		}
-		_, err := fmt.Fprintf(output, "Wrote Compose model to %s. No Docker operations were performed.\n", path)
 		return err
 	}
 	_, err = output.Write(compose)
 	return err
 }
 
-func appComposeOperation(action, name string, extra []string, paths portable.Paths, output io.Writer) error {
+func writeAppComposeModel(name string, paths portable.Paths) (string, error) {
+	if paths.State == "" {
+		return "", fmt.Errorf("state directory is not configured")
+	}
+	if err := composegen.Prepare(paths.Config, paths.State, name); err != nil {
+		return "", err
+	}
+	compose, err := composegen.Render(paths.Config, paths.State, name)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(paths.State, "apps", name, "compose.yaml")
+	if err := composehistory.WriteRendered(paths.State, name, compose); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func appComposeOperation(action, name string, extra []string, paths portable.Paths, output io.Writer) (returnErr error) {
 	switch action {
-	case "config", "apply", "up", "down", "start", "stop", "restart", "ps", "health", "rollback", "logs", "exec":
+	case "config", "apply", "up", "deploy", "down", "start", "stop", "restart", "ps", "health", "rollback", "logs", "exec":
 	default:
 		return fmt.Errorf("unknown app Compose action %q", action)
 	}
 	switch action {
-	case "config", "apply", "up", "down", "start", "stop", "restart", "rollback":
-		if len(extra) != 0 {
+	case "config", "apply", "up", "deploy", "down", "start", "stop", "restart", "rollback":
+		if action == "deploy" && len(extra) == 2 && extra[0] == "--ref" {
+			if strings.TrimSpace(extra[1]) == "" {
+				return fmt.Errorf("usage: dkit app compose deploy <name> [--ref <git-ref>]")
+			}
+		} else if len(extra) != 0 {
 			return fmt.Errorf("dkit app compose %s does not accept extra arguments", action)
 		}
 	case "ps", "health":
-		if action == "health" && len(extra) == 1 && extra[0] == "--json" {
+		if len(extra) == 1 && extra[0] == "--json" {
 			break
 		}
 		if len(extra) != 0 {
@@ -437,15 +490,62 @@ func appComposeOperation(action, name string, extra []string, paths portable.Pat
 			extra = extra[1:]
 		}
 	}
+	switch action {
+	case "apply", "up", "deploy", "down", "start", "stop", "restart", "rollback":
+		if action == "deploy" && len(extra) == 2 {
+			if err := buildApp([]string{name, "--ref", extra[1]}, paths); err != nil {
+				return fmt.Errorf("build app %q from requested ref before deploy: %w", name, err)
+			}
+			extra = nil
+		}
+		lock, err := applock.Acquire(paths.State, name)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			returnErr = errors.Join(returnErr, applock.Release(name, lock))
+		}()
+	}
+	state, err := deploymentstate.Load(paths.State, name)
+	if err != nil {
+		return err
+	}
+	if state.ActiveSlot != "" {
+		if action == "config" {
+			override, err := composeOverridePath(paths.Config, name)
+			if err != nil {
+				return err
+			}
+			if override != "" {
+				return fmt.Errorf("app %q is managed by blue/green slots; Compose overrides are not supported", name)
+			}
+		}
+		switch action {
+		case "rollback":
+			return appComposeBlueGreenRollback(name, paths, output)
+		case "deploy":
+			return appComposeBlueGreenDeploy(name, paths, output)
+		case "apply", "up", "down", "start", "stop", "restart":
+			return fmt.Errorf("app %q is managed by blue/green slots; use `dkit app compose deploy %s` or `dkit app compose rollback %s`", name, name, name)
+		}
+	}
+	if action == "deploy" {
+		return appComposeBlueGreenDeploy(name, paths, output)
+	}
 	if action == "rollback" {
 		return appComposeRollback(name, paths, output)
 	}
 	if action == "apply" {
-		if err := appComposeCommand([]string{"render", name, "--write"}, paths, io.Discard); err != nil {
+		if _, err := writeAppComposeModel(name, paths); err != nil {
 			return fmt.Errorf("render app %q configuration before apply: %w", name, err)
 		}
 	}
-	args, err := appComposeProjectArgs(name, paths)
+	var args []string
+	if state.ActiveSlot != "" && (action == "config" || action == "ps" || action == "health" || action == "logs" || action == "exec") {
+		args, err = appComposeArgsForDeployment(name, paths, state)
+	} else {
+		args, err = appComposeProjectArgs(name, paths)
+	}
 	if err != nil {
 		return err
 	}
@@ -455,6 +555,14 @@ func appComposeOperation(action, name string, extra []string, paths portable.Pat
 			return fmt.Errorf("read app %q Compose health: %w", name, err)
 		}
 		report, healthErr := inspectAppHealth(name, data)
+		if state.ActiveSlot != "" {
+			healthErr = inspectAppSlotHealth(name, state.ActiveSlot, data)
+			report = appHealthReport{App: name + " (" + state.ActiveSlot + " slot)", Ready: healthErr == nil}
+			report.Containers, _ = parseComposeStatuses(data)
+			if healthErr != nil {
+				report.Error = healthErr.Error()
+			}
+		}
 		if len(extra) == 1 && extra[0] == "--json" {
 			if err := json.NewEncoder(output).Encode(report); err != nil {
 				return err
@@ -486,24 +594,138 @@ func appComposeOperation(action, name string, extra []string, paths portable.Pat
 		args = append(args, "--remove-orphans")
 	case "ps":
 		args = append(args, "--all")
+		if len(extra) == 1 && extra[0] == "--json" {
+			args = append(args, "--format", "json")
+		}
 	case "exec":
-		args = append(args, "-T", "app")
+		service := "app"
+		if state.ActiveSlot != "" {
+			service = "web-" + state.ActiveSlot
+		}
+		args = append(args, "-T", service)
 		if len(extra) == 0 {
 			extra = []string{"sh"}
 		}
 		args = append(args, extra...)
 	}
+	if action == "ps" && len(extra) == 1 && extra[0] == "--json" {
+		data, err := dockerOutput(args[:len(args)-4], "ps", "--all", "--format", "json")
+		if err != nil {
+			return err
+		}
+		statuses, err := parseComposeStatuses(data)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(statuses)
+	}
+	var routeBefore []byte
+	routeExisted := false
+	if action == "down" || action == "stop" {
+		routeBefore, routeExisted, err = removeAppTraefikRoute(paths.State, name)
+		if err != nil {
+			return fmt.Errorf("remove app %q Traefik route before Compose %s: %w", name, action, err)
+		}
+	}
 	if err := runCommand("docker", args...); err != nil {
+		if routeExisted {
+			if restoreErr := restoreAppTraefikRoute(paths.State, name, routeBefore); restoreErr != nil {
+				return fmt.Errorf("app %q Compose %s failed (%v), and its previous Traefik route could not be restored: %w", name, action, err, restoreErr)
+			}
+			return fmt.Errorf("app %q Compose %s failed; its previous Traefik route was restored: %w", name, action, err)
+		}
 		return fmt.Errorf("app %q Compose %s failed: %w", name, action, err)
+	}
+	if action == "start" || action == "restart" {
+		if err := waitAppComposeHealth(name, paths, args); err != nil {
+			return fmt.Errorf("Compose %s for app %q completed, but the app did not become healthy; its public route was not changed: %w", action, name, err)
+		}
+	}
+	switch action {
+	case "up", "apply", "start", "restart":
+		if err := updateAppTraefikRoute(paths, name); err != nil {
+			return fmt.Errorf("Compose %s for app %q succeeded, but updating its Traefik web route failed: %w", action, name, err)
+		}
 	}
 	if action == "up" || action == "apply" {
 		if action == "apply" {
-			_, err = fmt.Fprintln(output, "Current app configuration was rendered and applied. Services may have been recreated; this does not build Git images or switch public traffic.")
+			_, err = fmt.Fprintln(output, "Current app configuration was rendered and applied. Services may have been recreated; the Traefik web route was refreshed, but this remains a single-service deployment, not a blue/green traffic switch.")
 			return err
 		}
-		_, err = fmt.Fprintln(output, "Compose services passed their health checks. This is not a blue/green traffic switch.")
+		_, err = fmt.Fprintln(output, "Compose services passed their health checks and the Traefik web route was refreshed. This is not a blue/green traffic switch.")
 	}
 	return err
+}
+
+func removeAppTraefikRoute(stateDir, name string) ([]byte, bool, error) {
+	previous, exists, err := traefikroute.Read(stateDir, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := traefikroute.Remove(stateDir, name); err != nil {
+		return nil, false, err
+	}
+	return previous, exists, nil
+}
+
+func restoreAppTraefikRoute(stateDir, name string, route []byte) error {
+	return traefikroute.Write(stateDir, name, route)
+}
+
+func waitAppComposeHealth(name string, paths portable.Paths, composeArgs []string) error {
+	if len(composeArgs) == 0 || (composeArgs[len(composeArgs)-1] != "start" && composeArgs[len(composeArgs)-1] != "restart") {
+		return fmt.Errorf("internal error: expected Compose start or restart arguments")
+	}
+	healthArgs := append([]string(nil), composeArgs[:len(composeArgs)-1]...)
+	app, err := appconfig.Read(paths.Config, name)
+	if err != nil {
+		return err
+	}
+	timeout := 90
+	if configured := app.Values["HEALTH_TIMEOUT"]; configured != "" {
+		timeout, err = strconv.Atoi(configured)
+		if err != nil || timeout < 1 || timeout > 240 {
+			return fmt.Errorf("app %q HEALTH_TIMEOUT must be an integer from 1 to 240 seconds", name)
+		}
+	}
+	var lastErr error
+	for attempt := 0; attempt < timeout; attempt++ {
+		data, err := dockerOutput(healthArgs, "ps", "--all", "--format", "json")
+		if err == nil {
+			_, lastErr = inspectAppHealth(name, data)
+			if lastErr == nil {
+				return nil
+			}
+		} else {
+			lastErr = fmt.Errorf("read Compose health: %w", err)
+		}
+		if attempt+1 < timeout {
+			time.Sleep(time.Second)
+		}
+	}
+	return fmt.Errorf("HTTP health probe did not pass within %d seconds: %w", timeout, lastErr)
+}
+
+func updateAppTraefikRoute(paths portable.Paths, name string) error {
+	app, err := appconfig.Read(paths.Config, name)
+	if err != nil {
+		return err
+	}
+	if !app.Valid {
+		return fmt.Errorf("app %q configuration is invalid: %s", name, strings.Join(app.Errors, "; "))
+	}
+	if app.Values["PUBLIC"] == "0" {
+		return traefikroute.Remove(paths.State, name)
+	}
+	port := app.Values["WEB_PORT"]
+	if port == "" {
+		port = "8080"
+	}
+	route, err := traefikroute.Render(name, app.Domains, port, app.Values["HEALTH_PATH"])
+	if err != nil {
+		return err
+	}
+	return traefikroute.Write(paths.State, name, route)
 }
 
 func appComposeProjectArgs(name string, paths portable.Paths) ([]string, error) {
@@ -563,7 +785,33 @@ func appComposeProjectArgs(name string, paths portable.Paths) ([]string, error) 
 		return nil, fmt.Errorf("inspect app %q service credentials %s: %w", name, servicesEnv, statErr)
 	}
 	args = append(args, "--project-name", "dkit-"+name, "--file", composePath)
+	overridePath, err := composeOverridePath(paths.Config, name)
+	if err != nil {
+		return nil, err
+	}
+	if overridePath != "" {
+		args = append(args, "--file", overridePath)
+	}
 	return args, nil
+}
+
+func composeOverridePath(configDir, name string) (string, error) {
+	appPath, err := appconfig.AppFilePath(configDir, name)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(filepath.Dir(appPath), "compose.override.yaml")
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect app %q Compose override: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("app %q Compose override is not a regular file: %s", name, path)
+	}
+	return path, nil
 }
 
 func dbCommand(args []string, paths portable.Paths) error {
@@ -675,6 +923,13 @@ func dbMigrateCommand(name string, app appconfig.App, paths portable.Paths) erro
 	if migration == "" {
 		return fmt.Errorf("app %q has no MIGRATE_CMD configured", name)
 	}
+	deployment, err := deploymentstate.Load(paths.State, name)
+	if err != nil {
+		return err
+	}
+	if deployment.ActiveSlot != "" {
+		return fmt.Errorf("app %q uses blue/green slots; database migration orchestration is not supported by portable blue/green deploy", name)
+	}
 	command, err := appComposeProjectArgs(name, paths)
 	if err != nil {
 		return err
@@ -724,7 +979,11 @@ func logsCommand(args []string, paths portable.Paths) error {
 	if !app.Valid {
 		return fmt.Errorf("app %q configuration is invalid: %s", name, strings.Join(app.Errors, "; "))
 	}
-	if app.Values["SOURCE"] != "image" {
+	deployment, err := deploymentstate.Load(paths.State, name)
+	if err != nil {
+		return err
+	}
+	if app.Values["SOURCE"] != "image" && deployment.ActiveSlot == "" {
 		if runtime.GOOS == "linux" {
 			return runLegacy(append([]string{"logs"}, args...), paths)
 		}
@@ -757,9 +1016,16 @@ func logsCommand(args []string, paths portable.Paths) error {
 			return fmt.Errorf("app %q has no Compose service %q", name, service)
 		}
 	}
-	command, err := appComposeProjectArgs(name, paths)
+	command, err := appComposeArgsForDeployment(name, paths, deployment)
 	if err != nil {
 		return err
+	}
+	if deployment.ActiveSlot != "" {
+		for index, service := range requested {
+			if service == "app" {
+				requested[index] = "web-" + deployment.ActiveSlot
+			}
+		}
 	}
 	command = append(command, "logs", "--timestamps", "--tail="+tail)
 	if follow {
@@ -789,7 +1055,11 @@ func execAppCommand(args []string, paths portable.Paths) error {
 	if !app.Valid {
 		return fmt.Errorf("app %q configuration is invalid: %s", name, strings.Join(app.Errors, "; "))
 	}
-	if app.Values["SOURCE"] != "image" {
+	deployment, err := deploymentstate.Load(paths.State, name)
+	if err != nil {
+		return err
+	}
+	if app.Values["SOURCE"] != "image" && deployment.ActiveSlot == "" {
 		if runtime.GOOS == "linux" {
 			return runLegacy(append([]string{"exec"}, args...), paths)
 		}
@@ -801,9 +1071,12 @@ func execAppCommand(args []string, paths portable.Paths) error {
 	if len(commandArgs) == 0 {
 		commandArgs = []string{"sh"}
 	}
-	command, err := appComposeProjectArgs(name, paths)
+	command, err := appComposeArgsForDeployment(name, paths, deployment)
 	if err != nil {
 		return err
+	}
+	if deployment.ActiveSlot != "" && service == "app" {
+		service = "web-" + deployment.ActiveSlot
 	}
 	command = append(command, "exec", "-T", "-i", service)
 	command = append(command, commandArgs...)
@@ -1293,7 +1566,19 @@ func getApp(args []string, configDir string, output io.Writer) error {
 	return nil
 }
 
-func setApp(args []string, configDir string, output io.Writer) error {
+func setApp(args []string, configDir string, output io.Writer, input io.Reader) error {
+	if len(args) == 2 && args[1] == "-" {
+		set, unset, err := parseStdinEdits(input)
+		if err != nil {
+			return err
+		}
+		_, err = appconfig.Update(configDir, args[0], set, unset)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(output, "Updated app %q app.env. No Docker operations were performed.\n", args[0])
+		return err
+	}
 	set, unset, name, err := parseEditArgs(args)
 	if err != nil {
 		return fmt.Errorf("usage: dkit app set <name> KEY=VALUE... [--unset KEY]")
@@ -1306,7 +1591,41 @@ func setApp(args []string, configDir string, output io.Writer) error {
 	return err
 }
 
-func envCommand(args []string, configDir string, output io.Writer) error {
+func parseStdinEdits(input io.Reader) (map[string]string, []string, error) {
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read app settings: %w", err)
+	}
+	set := make(map[string]string)
+	var unset []string
+	for lineNumber, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "-") && !strings.Contains(line, "=") {
+			key := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+			if key == "" {
+				return nil, nil, fmt.Errorf("line %d: unset requires a key", lineNumber+1)
+			}
+			unset = append(unset, key)
+			continue
+		}
+		values, err := appconfig.Parse([]byte(line + "\n"))
+		if err != nil {
+			return nil, nil, fmt.Errorf("line %d: %w", lineNumber+1, err)
+		}
+		for key, value := range values {
+			set[key] = value
+		}
+	}
+	if len(set) == 0 && len(unset) == 0 {
+		return nil, nil, fmt.Errorf("at least one app setting is required")
+	}
+	return set, unset, nil
+}
+
+func envCommand(args []string, configDir string, output io.Writer, input io.Reader) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: dkit env list|set|unset <name> [options]")
 	}
@@ -1345,6 +1664,33 @@ func envCommand(args []string, configDir string, output io.Writer) error {
 		}
 		_, err = fmt.Fprintf(output, "Updated app %q env. No Docker operations were performed.\n", name)
 		return err
+	case "replace":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: dkit env replace <name> with KEY=VALUE data on stdin")
+		}
+		data, err := io.ReadAll(input)
+		if err != nil {
+			return fmt.Errorf("read replacement environment: %w", err)
+		}
+		replacement, err := appconfig.ParseEnv(data)
+		if err != nil {
+			return fmt.Errorf("parse replacement environment: %w", err)
+		}
+		current, err := appconfig.ReadEnv(configDir, name)
+		if err != nil {
+			return err
+		}
+		var unset []string
+		for key := range current {
+			if _, exists := replacement[key]; !exists {
+				unset = append(unset, key)
+			}
+		}
+		if _, err := appconfig.UpdateEnv(configDir, name, replacement, unset); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(output, "Replaced app %q env. No Docker operations were performed.\n", name)
+		return err
 	case "unset":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: dkit env unset <name> <key...>")
@@ -1358,6 +1704,132 @@ func envCommand(args []string, configDir string, output io.Writer) error {
 	default:
 		return fmt.Errorf("unknown env command %q; use list, set, or unset", action)
 	}
+}
+
+func configCommand(args []string, configDir string, output io.Writer, input io.Reader) error {
+	if len(args) == 0 {
+		args = []string{"get"}
+	}
+	file := filepath.Join(configDir, "dkit.env")
+	switch args[0] {
+	case "get":
+		if len(args) > 2 || (len(args) == 2 && strings.HasPrefix(args[1], "-") && args[1] != "--json") {
+			return fmt.Errorf("usage: dkit config get [key|--json]")
+		}
+		values, err := readGlobalConfig(file)
+		if err != nil {
+			return err
+		}
+		if len(args) == 2 && args[1] == "--json" {
+			return json.NewEncoder(output).Encode(values)
+		}
+		if len(args) == 2 {
+			_, err := fmt.Fprintln(output, values[args[1]])
+			return err
+		}
+		for _, key := range sortedKeys(values) {
+			if _, err := fmt.Fprintf(output, "%s=%s\n", key, configValue(values[key])); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "set":
+		var data []byte
+		var err error
+		if len(args) == 2 && args[1] == "-" {
+			data, err = io.ReadAll(input)
+			if err != nil {
+				return fmt.Errorf("read global settings: %w", err)
+			}
+		} else {
+			if len(args) < 2 {
+				return fmt.Errorf("usage: dkit config set KEY=VALUE... | dkit config set -")
+			}
+			data = []byte(strings.Join(args[1:], "\n") + "\n")
+		}
+		set, err := appconfig.Parse(data)
+		if err != nil {
+			return fmt.Errorf("parse global settings: %w", err)
+		}
+		if len(set) == 0 {
+			return fmt.Errorf("at least one global setting is required")
+		}
+		current, err := readGlobalConfig(file)
+		if err != nil {
+			return err
+		}
+		updated := make(map[string]string, len(current)+len(set))
+		for key, value := range current {
+			updated[key] = value
+		}
+		for key, value := range set {
+			updated[key] = value
+		}
+		if err := validateGlobalConfig(updated); err != nil {
+			return err
+		}
+		original, err := os.ReadFile(file)
+		if os.IsNotExist(err) {
+			original = nil
+		} else if err != nil {
+			return fmt.Errorf("read global settings %s: %w", file, err)
+		}
+		rewritten, err := appconfig.Rewrite(original, set, nil)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			return fmt.Errorf("create config directory %s: %w", configDir, err)
+		}
+		if err := appconfig.WriteFileAtomic(file, rewritten, 0o600); err != nil {
+			return fmt.Errorf("write global settings %s: %w", file, err)
+		}
+		_, err = fmt.Fprintln(output, "Updated global dkit.env settings. No platform or Docker operations were performed.")
+		return err
+	default:
+		return fmt.Errorf("unknown config command %q; use get or set", args[0])
+	}
+}
+
+func readGlobalConfig(file string) (map[string]string, error) {
+	data, err := os.ReadFile(file)
+	if os.IsNotExist(err) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read global settings %s: %w", file, err)
+	}
+	values, err := appconfig.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse global settings %s: %w", file, err)
+	}
+	return values, nil
+}
+
+func validateGlobalConfig(values map[string]string) error {
+	if domain := values["UI_DOMAIN"]; domain != "" && !regexpDomain.MatchString(domain) {
+		return fmt.Errorf("invalid UI_DOMAIN %q", domain)
+	}
+	if count := values["KEEP_IMAGES"]; count != "" {
+		n, err := strconv.Atoi(count)
+		if err != nil || n < 0 {
+			return fmt.Errorf("KEEP_IMAGES must be a non-negative integer")
+		}
+	}
+	for _, key := range []string{"KEEP_PREVIOUS", "BUILD_PULL"} {
+		if value := values[key]; value != "" && value != "0" && value != "1" {
+			return fmt.Errorf("%s must be 0 or 1", key)
+		}
+	}
+	if engine := values["DKIT_UI_ENGINE"]; engine != "" && engine != "legacy" && engine != "portable" {
+		return fmt.Errorf("DKIT_UI_ENGINE must be legacy or portable")
+	}
+	for _, service := range strings.Fields(values["SHARED_SERVICES"]) {
+		if service != "mariadb" && service != "postgres" && service != "s3" {
+			return fmt.Errorf("SHARED_SERVICES contains unsupported service %q", service)
+		}
+	}
+	return nil
 }
 
 func parseEditArgs(args []string) (map[string]string, []string, string, error) {
@@ -1458,8 +1930,84 @@ func presetCommand(args []string, configDir string, output io.Writer) error {
 	if len(args) == 0 {
 		args = []string{"list"}
 	}
-	if args[0] != "list" && args[0] != "ls" {
-		return runLegacy(append([]string{"preset"}, args...), portable.Paths{Config: configDir})
+	switch args[0] {
+	case "create":
+		if len(args) != 2 && len(args) != 4 {
+			return fmt.Errorf("usage: dkit preset create <name> [--from <preset>]")
+		}
+		name := args[1]
+		from := name
+		if len(args) == 4 {
+			if args[2] != "--from" {
+				return fmt.Errorf("usage: dkit preset create <name> [--from <preset>]")
+			}
+			from = args[3]
+		}
+		if !appconfig.ValidName(name) || !appconfig.ValidName(from) {
+			return fmt.Errorf("invalid preset name")
+		}
+		target := filepath.Join(configDir, "presets", name)
+		if _, err := os.Lstat(target); err == nil {
+			return fmt.Errorf("local preset %q already exists", name)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect local preset %q: %w", name, err)
+		}
+		template, err := presetcatalog.Read(configDir, from)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			return fmt.Errorf("create local preset directory: %w", err)
+		}
+		if err := appconfig.WriteFileAtomic(filepath.Join(target, "app.env"), template.AppEnv, 0o600); err != nil {
+			return fmt.Errorf("write local preset app.env: %w", err)
+		}
+		if len(template.Env) != 0 {
+			if err := appconfig.WriteFileAtomic(filepath.Join(target, "env"), template.Env, 0o600); err != nil {
+				return fmt.Errorf("write local preset env: %w", err)
+			}
+		}
+		_, err = fmt.Fprintf(output, "Created local preset %q from %q.\n", name, from)
+		return err
+	case "remove", "rm":
+		if len(args) != 2 || !appconfig.ValidName(args[1]) {
+			return fmt.Errorf("usage: dkit preset remove <name>")
+		}
+		dir := filepath.Join(configDir, "presets", args[1])
+		if _, err := os.Stat(filepath.Join(dir, "app.env")); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("local preset %q does not exist", args[1])
+			}
+			return fmt.Errorf("inspect local preset %q: %w", args[1], err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("remove local preset %q: %w", args[1], err)
+		}
+		_, err := fmt.Fprintf(output, "Removed local preset %q.\n", args[1])
+		return err
+	case "show":
+		if len(args) != 3 || args[2] != "--json" || !appconfig.ValidName(args[1]) {
+			return fmt.Errorf("usage: dkit preset show <name> --json")
+		}
+		preset, err := presetcatalog.Read(configDir, args[1])
+		if err != nil {
+			return err
+		}
+		_, err = os.Stat(filepath.Join(configDir, "presets", args[1], "app.env"))
+		local := err == nil
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect local preset %q: %w", args[1], err)
+		}
+		document := struct {
+			Name   string `json:"name"`
+			Local  bool   `json:"local"`
+			AppEnv string `json:"app_env"`
+			Env    string `json:"env"`
+		}{Name: args[1], Local: local, AppEnv: string(preset.AppEnv), Env: string(preset.Env)}
+		return json.NewEncoder(output).Encode(document)
+	case "list", "ls":
+	default:
+		return fmt.Errorf("unknown preset command %q; use list, create, or remove", args[0])
 	}
 	if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
 		return fmt.Errorf("usage: dkit preset list [--json]")
@@ -1485,6 +2033,211 @@ func presetCommand(args []string, configDir string, output io.Writer) error {
 		}
 	}
 	return table.Flush()
+}
+
+type templateInfo struct {
+	Name  string `json:"name"`
+	Local bool   `json:"local"`
+}
+
+func templateCommand(args []string, configDir string, output io.Writer) error {
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "list", "ls":
+		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
+			return fmt.Errorf("usage: dkit template list [--json]")
+		}
+		templates, err := listBuildTemplates(configDir)
+		if err != nil {
+			return err
+		}
+		if len(args) == 2 {
+			return json.NewEncoder(output).Encode(templates)
+		}
+		table := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
+		if _, err := fmt.Fprintln(table, "TEMPLATE\tSOURCE"); err != nil {
+			return err
+		}
+		for _, template := range templates {
+			source := "built-in"
+			if template.Local {
+				source = "local override"
+			}
+			if _, err := fmt.Fprintf(table, "%s\t%s\n", template.Name, source); err != nil {
+				return err
+			}
+		}
+		return table.Flush()
+	case "show":
+		if len(args) != 3 || args[2] != "--json" || !validTemplateName(args[1]) {
+			return fmt.Errorf("usage: dkit template show <name> --json")
+		}
+		content, err := readBuildTemplate(configDir, args[1])
+		if err != nil {
+			return err
+		}
+		templates, err := listBuildTemplates(configDir)
+		if err != nil {
+			return err
+		}
+		var local bool
+		for _, template := range templates {
+			if template.Name == args[1] {
+				local = template.Local
+				break
+			}
+		}
+		if !local {
+			if _, err := buildtemplates.Read(args[1]); err != nil {
+				return fmt.Errorf("template %q is not available", args[1])
+			}
+		}
+		return json.NewEncoder(output).Encode(struct {
+			Name    string `json:"name"`
+			Local   bool   `json:"local"`
+			Content string `json:"content"`
+		}{Name: args[1], Local: local, Content: string(content)})
+	case "create":
+		if len(args) != 2 && len(args) != 4 {
+			return fmt.Errorf("usage: dkit template create <name> [--from <template>]")
+		}
+		name, from := args[1], "php"
+		if len(args) == 4 {
+			if args[2] != "--from" {
+				return fmt.Errorf("usage: dkit template create <name> [--from <template>]")
+			}
+			from = args[3]
+		}
+		if !validTemplateName(name) || !validTemplateName(from) {
+			return fmt.Errorf("invalid template name")
+		}
+		targetDir := filepath.Join(configDir, "templates", name)
+		if _, err := os.Lstat(targetDir); err == nil {
+			return fmt.Errorf("local template %q already exists", name)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect local template %q: %w", name, err)
+		}
+		source, err := readBuildTemplate(configDir, from)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(targetDir, 0o700); err != nil {
+			return fmt.Errorf("create local template directory: %w", err)
+		}
+		if err := appconfig.WriteFileAtomic(filepath.Join(targetDir, "Dockerfile"), source, 0o600); err != nil {
+			return fmt.Errorf("write local Dockerfile: %w", err)
+		}
+		ignore, found, err := readBuildDockerignore(configDir, from)
+		if err != nil {
+			return err
+		}
+		if found {
+			if err := appconfig.WriteFileAtomic(filepath.Join(targetDir, "Dockerfile.dockerignore"), ignore, 0o600); err != nil {
+				return fmt.Errorf("write local Dockerfile.dockerignore: %w", err)
+			}
+		}
+		_, err = fmt.Fprintf(output, "Created local template %q from %q.\n", name, from)
+		return err
+	case "reset":
+		if len(args) != 2 || !validTemplateName(args[1]) {
+			return fmt.Errorf("usage: dkit template reset <name>")
+		}
+		dir := filepath.Join(configDir, "templates", args[1])
+		if _, err := os.Lstat(dir); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("local template %q does not exist", args[1])
+			}
+			return fmt.Errorf("inspect local template %q: %w", args[1], err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("remove local template %q: %w", args[1], err)
+		}
+		_, err := fmt.Fprintf(output, "Removed local template %q; the built-in template will be used.\n", args[1])
+		return err
+	default:
+		return fmt.Errorf("unknown template command %q; use list, create, or reset", args[0])
+	}
+}
+
+func listBuildTemplates(configDir string) ([]templateInfo, error) {
+	entries, err := fs.ReadDir(buildtemplates.Files, ".")
+	if err != nil {
+		return nil, fmt.Errorf("list built-in templates: %w", err)
+	}
+	found := make(map[string]templateInfo, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			found[entry.Name()] = templateInfo{Name: entry.Name()}
+		}
+	}
+	localDir := filepath.Join(configDir, "templates")
+	localEntries, err := os.ReadDir(localDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read local templates %s: %w", localDir, err)
+	}
+	for _, entry := range localEntries {
+		if !entry.IsDir() || !validTemplateName(entry.Name()) {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(localDir, entry.Name(), "Dockerfile"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect local template %q: %w", entry.Name(), err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		found[entry.Name()] = templateInfo{Name: entry.Name(), Local: true}
+	}
+	result := make([]templateInfo, 0, len(found))
+	for _, template := range found {
+		result = append(result, template)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
+
+func readBuildTemplate(configDir, name string) ([]byte, error) {
+	localFile := filepath.Join(configDir, "templates", name, "Dockerfile")
+	data, err := os.ReadFile(localFile)
+	if err == nil {
+		return data, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read local template %q: %w", name, err)
+	}
+	data, err = buildtemplates.Read(name)
+	if err != nil {
+		return nil, fmt.Errorf("read built-in template %q: %w", name, err)
+	}
+	return data, nil
+}
+
+func readBuildDockerignore(configDir, name string) ([]byte, bool, error) {
+	localFile := filepath.Join(configDir, "templates", name, "Dockerfile.dockerignore")
+	data, err := os.ReadFile(localFile)
+	if err == nil {
+		return data, true, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, false, fmt.Errorf("read local template ignore file %q: %w", name, err)
+	}
+	data, err = buildtemplates.ReadDockerignore(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read built-in template ignore file %q: %w", name, err)
+	}
+	return data, true, nil
+}
+
+func validTemplateName(name string) bool {
+	return templateNamePattern.MatchString(name)
 }
 
 func truncateDescription(value string, max int) string {

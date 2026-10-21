@@ -23,6 +23,9 @@ func TestRemoveAppArchivesConfigAndPreservesState(t *testing.T) {
 	if err := appCommand([]string{"compose", "render", "demo", "--write"}, paths, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := updateAppTraefikRoute(paths, "demo"); err != nil {
+		t.Fatal(err)
+	}
 
 	var output bytes.Buffer
 	if err := removeAppCommand([]string{"demo", "--yes"}, paths, &output); err != nil {
@@ -40,6 +43,9 @@ func TestRemoveAppArchivesConfigAndPreservesState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(paths.State, "apps", "demo", "compose.yaml")); err != nil {
 		t.Fatalf("app state was not preserved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.State, "traefik", "dynamic", "demo.yml")); !os.IsNotExist(err) {
+		t.Fatalf("app route was not removed: %v", err)
 	}
 	assertCapturedDockerArgs(t, capture, []string{
 		"--context", "desktop-linux", "compose", "--env-file", filepath.Join(paths.Config, "apps", "demo", "services.env"),
@@ -59,6 +65,9 @@ func TestRemoveAppPurgeRequiresConfirmationAndRemovesLocalState(t *testing.T) {
 	if err := appCommand([]string{"compose", "render", "demo", "--write"}, paths, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := updateAppTraefikRoute(paths, "demo"); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := removeAppCommand([]string{"demo", "--purge"}, paths, &bytes.Buffer{}); err == nil {
 		t.Fatal("purge succeeded without explicit confirmation")
@@ -76,6 +85,7 @@ func TestRemoveAppPurgeRequiresConfirmationAndRemovesLocalState(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(paths.Config, "apps", "demo"),
 		filepath.Join(paths.State, "apps", "demo"),
+		filepath.Join(paths.State, "traefik", "dynamic", "demo.yml"),
 	} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("purge left %s in place: %v", path, err)
@@ -94,10 +104,22 @@ func TestRemoveAppDockerFailureLeavesConfigurationAndState(t *testing.T) {
 	t.Setenv("DKIT_TEST_DOCKER_FAIL_MATCH", "down")
 	t.Setenv("DOCKER_CONTEXT", "")
 	paths, _ := testRenderedApp(t, "postgres")
+	if err := updateAppTraefikRoute(paths, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	routePath := filepath.Join(paths.State, "traefik", "dynamic", "demo.yml")
+	originalRoute, err := os.ReadFile(routePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	err := removeAppCommand([]string{"demo", "--yes"}, paths, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "stop app") {
+	err = removeAppCommand([]string{"demo", "--yes"}, paths, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "route was restored") {
 		t.Fatalf("remove error = %v, want Compose failure", err)
+	}
+	restoredRoute, err := os.ReadFile(routePath)
+	if err != nil || !bytes.Equal(restoredRoute, originalRoute) {
+		t.Fatalf("route after failed removal = %q, err=%v", restoredRoute, err)
 	}
 	for _, path := range []string{
 		filepath.Join(paths.Config, "apps", "demo", "app.env"),

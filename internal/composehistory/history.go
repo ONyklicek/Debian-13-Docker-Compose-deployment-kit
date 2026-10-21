@@ -4,9 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gofrs/flock"
 
 	"github.com/onyklicek/debian-13-docker-compose-deployment-kit/internal/appconfig"
 )
@@ -15,6 +18,19 @@ type manifest struct {
 	ActiveSHA256   string `json:"active_sha256"`
 	PreviousSHA256 string `json:"previous_sha256,omitempty"`
 	RenderSHA256   string `json:"render_sha256"`
+}
+
+type promotionJournal struct {
+	Version              int    `json:"version"`
+	ActiveBefore         []byte `json:"active_before"`
+	PreviousBefore       []byte `json:"previous_before"`
+	ManifestBefore       []byte `json:"manifest_before"`
+	ActiveBeforeSHA256   string `json:"active_before_sha256"`
+	PreviousBeforeSHA256 string `json:"previous_before_sha256"`
+	ManifestBeforeSHA256 string `json:"manifest_before_sha256"`
+	ActiveAfterSHA256    string `json:"active_after_sha256"`
+	PreviousAfterSHA256  string `json:"previous_after_sha256"`
+	ManifestAfterSHA256  string `json:"manifest_after_sha256"`
 }
 
 func paths(stateDir, name string) (string, string, string, error) {
@@ -27,12 +43,21 @@ func paths(stateDir, name string) (string, string, string, error) {
 }
 
 func WriteRendered(stateDir, name string, content []byte) error {
+	return withHistoryLock(stateDir, name, func() error {
+		return writeRendered(stateDir, name, content)
+	})
+}
+
+func writeRendered(stateDir, name string, content []byte) error {
 	active, previous, metadata, err := paths(stateDir, name)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(active), 0o700); err != nil {
 		return fmt.Errorf("create app Compose history directory: %w", err)
+	}
+	if err := recoverPromotion(stateDir, name); err != nil {
+		return fmt.Errorf("recover interrupted Compose rollback for app %q: %w", name, err)
 	}
 	var old []byte
 	oldInfo, err := os.Lstat(active)
@@ -96,8 +121,17 @@ func WriteRendered(stateDir, name string, content []byte) error {
 }
 
 func VerifyActive(stateDir, name string, rendered, current []byte) bool {
-	if string(rendered) == string(current) {
-		return true
+	valid := false
+	err := withHistoryLock(stateDir, name, func() error {
+		valid = verifyActive(stateDir, name, rendered, current)
+		return nil
+	})
+	return err == nil && valid
+}
+
+func verifyActive(stateDir, name string, rendered, current []byte) bool {
+	if err := recoverPromotion(stateDir, name); err != nil {
+		return false
 	}
 	active, _, metadata, err := paths(stateDir, name)
 	if err != nil {
@@ -119,6 +153,19 @@ func VerifyActive(stateDir, name string, rendered, current []byte) bool {
 }
 
 func PreviousModel(stateDir, name string) (string, error) {
+	var model string
+	err := withHistoryLock(stateDir, name, func() error {
+		var err error
+		model, err = previousModel(stateDir, name)
+		return err
+	})
+	return model, err
+}
+
+func previousModel(stateDir, name string) (string, error) {
+	if err := recoverPromotion(stateDir, name); err != nil {
+		return "", fmt.Errorf("recover interrupted Compose rollback for app %q: %w", name, err)
+	}
 	_, previous, metadata, err := paths(stateDir, name)
 	if err != nil {
 		return "", err
@@ -148,6 +195,15 @@ func PreviousModel(stateDir, name string) (string, error) {
 }
 
 func PromotePrevious(stateDir, name string) error {
+	return withHistoryLock(stateDir, name, func() error {
+		return promotePrevious(stateDir, name)
+	})
+}
+
+func promotePrevious(stateDir, name string) error {
+	if err := recoverPromotion(stateDir, name); err != nil {
+		return fmt.Errorf("recover interrupted Compose rollback for app %q: %w", name, err)
+	}
 	active, previous, metadata, err := paths(stateDir, name)
 	if err != nil {
 		return err
@@ -177,31 +233,36 @@ func PromotePrevious(stateDir, name string) error {
 	if state.PreviousSHA256 == "" || digest(prior) != state.PreviousSHA256 {
 		return fmt.Errorf("previous Compose model for app %q is missing or modified; refusing rollback", name)
 	}
-	if err := atomicWrite(previous, current); err != nil {
-		return fmt.Errorf("save active Compose model as recovery target: %w", err)
-	}
-	if err := atomicWrite(active, prior); err != nil {
-		if restoreErr := atomicWrite(previous, prior); restoreErr != nil {
-			return fmt.Errorf("activate previous Compose model: %v; restore previous history: %w", err, restoreErr)
-		}
-		return err
-	}
-	oldState := state
 	state.ActiveSHA256 = digest(prior)
 	state.PreviousSHA256 = digest(current)
 	// Keep the render hash for the current app.env configuration. This allows
 	// only this recorded rollback model, not an unrelated stale file.
-	if err := writeManifest(metadata, state); err != nil {
-		restoreActiveErr := atomicWrite(active, current)
-		restorePreviousErr := atomicWrite(previous, prior)
-		restoreManifestErr := writeManifest(metadata, oldState)
-		if restoreActiveErr != nil || restorePreviousErr != nil || restoreManifestErr != nil {
-			return fmt.Errorf("promote Compose rollback history: %v; recovery failures (active=%v, previous=%v, manifest=%v)",
-				err, restoreActiveErr, restorePreviousErr, restoreManifestErr)
-		}
-		return fmt.Errorf("promote Compose rollback history: %w", err)
+	manifestAfter, err := manifestData(state)
+	if err != nil {
+		return err
 	}
-	return nil
+	return promoteTransaction(stateDir, name, active, previous, metadata, current, prior, data, manifestAfter)
+}
+
+func withHistoryLock(stateDir, name string, operation func() error) (err error) {
+	active, _, _, err := paths(stateDir, name)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(active)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create Compose history directory for app %q: %w", name, err)
+	}
+	lock := flock.New(filepath.Join(dir, ".compose-history.lock"))
+	if err := lock.Lock(); err != nil {
+		return fmt.Errorf("lock Compose history for app %q: %w", name, err)
+	}
+	defer func() {
+		if unlockErr := lock.Unlock(); unlockErr != nil {
+			err = errors.Join(err, fmt.Errorf("unlock Compose history for app %q: %w", name, unlockErr))
+		}
+	}()
+	return operation()
 }
 
 func readRegular(path string) ([]byte, error) {
@@ -216,11 +277,126 @@ func readRegular(path string) ([]byte, error) {
 }
 
 func writeManifest(path string, state manifest) error {
+	data, err := manifestData(state)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, data)
+}
+
+func manifestData(state manifest) ([]byte, error) {
 	data, err := json.Marshal(state)
 	if err != nil {
-		return fmt.Errorf("encode Compose history: %w", err)
+		return nil, fmt.Errorf("encode Compose history: %w", err)
 	}
-	return atomicWrite(path, append(data, '\n'))
+	return append(data, '\n'), nil
+}
+
+func promoteTransaction(stateDir, name, active, previous, metadata string, activeBefore, previousBefore, manifestBefore, manifestAfter []byte) error {
+	journalPath := metadata + ".transaction.json"
+	journal := promotionJournal{
+		Version:              1,
+		ActiveBefore:         activeBefore,
+		PreviousBefore:       previousBefore,
+		ManifestBefore:       manifestBefore,
+		ActiveBeforeSHA256:   digest(activeBefore),
+		PreviousBeforeSHA256: digest(previousBefore),
+		ManifestBeforeSHA256: digest(manifestBefore),
+		ActiveAfterSHA256:    digest(previousBefore),
+		PreviousAfterSHA256:  digest(activeBefore),
+		ManifestAfterSHA256:  digest(manifestAfter),
+	}
+	data, err := json.Marshal(journal)
+	if err != nil {
+		return fmt.Errorf("encode Compose rollback transaction for app %q: %w", name, err)
+	}
+	if err := atomicWrite(journalPath, append(data, '\n')); err != nil {
+		return fmt.Errorf("prepare Compose rollback transaction for app %q: %w", name, err)
+	}
+	if err := atomicWrite(previous, activeBefore); err != nil {
+		return rollbackTransactionFailure(stateDir, name, fmt.Errorf("save active Compose model as recovery target: %w", err))
+	}
+	if err := atomicWrite(active, previousBefore); err != nil {
+		return rollbackTransactionFailure(stateDir, name, fmt.Errorf("activate previous Compose model: %w", err))
+	}
+	if err := atomicWrite(metadata, manifestAfter); err != nil {
+		return rollbackTransactionFailure(stateDir, name, fmt.Errorf("update Compose rollback manifest: %w", err))
+	}
+	if err := os.Remove(journalPath); err != nil {
+		return fmt.Errorf("Compose rollback for app %q committed, but transaction journal %s could not be removed: %w", name, journalPath, err)
+	}
+	return nil
+}
+
+func rollbackTransactionFailure(stateDir, name string, cause error) error {
+	if err := recoverPromotion(stateDir, name); err != nil {
+		return fmt.Errorf("%v; recover Compose rollback transaction: %w", cause, err)
+	}
+	return cause
+}
+
+func recoverPromotion(stateDir, name string) error {
+	_, _, metadata, err := paths(stateDir, name)
+	if err != nil {
+		return err
+	}
+	journalPath := metadata + ".transaction.json"
+	data, err := readRegular(journalPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read transaction journal %s: %w", journalPath, err)
+	}
+	var journal promotionJournal
+	if err := json.Unmarshal(data, &journal); err != nil {
+		return fmt.Errorf("parse transaction journal %s: %w", journalPath, err)
+	}
+	if journal.Version != 1 || journal.ActiveBefore == nil || journal.PreviousBefore == nil ||
+		journal.ManifestBefore == nil || journal.ActiveBeforeSHA256 != digest(journal.ActiveBefore) ||
+		journal.PreviousBeforeSHA256 != digest(journal.PreviousBefore) ||
+		journal.ManifestBeforeSHA256 != digest(journal.ManifestBefore) ||
+		journal.ActiveAfterSHA256 == "" ||
+		journal.PreviousAfterSHA256 == "" || journal.ManifestAfterSHA256 == "" {
+		return fmt.Errorf("transaction journal %s is incomplete, corrupted, or unsupported", journalPath)
+	}
+	active, previous, _, err := paths(stateDir, name)
+	if err != nil {
+		return err
+	}
+	activeNow, activeErr := readRegular(active)
+	previousNow, previousErr := readRegular(previous)
+	manifestNow, manifestErr := readRegular(metadata)
+	if activeErr == nil && previousErr == nil && manifestErr == nil &&
+		digest(activeNow) == journal.ActiveAfterSHA256 &&
+		digest(previousNow) == journal.PreviousAfterSHA256 &&
+		digest(manifestNow) == journal.ManifestAfterSHA256 {
+		if err := os.Remove(journalPath); err != nil {
+			return fmt.Errorf("remove committed transaction journal %s: %w", journalPath, err)
+		}
+		return nil
+	}
+	for _, check := range []struct {
+		path string
+		err  error
+	}{{active, activeErr}, {previous, previousErr}, {metadata, manifestErr}} {
+		if check.err != nil {
+			return fmt.Errorf("inspect transaction file %s during recovery: %w", check.path, check.err)
+		}
+	}
+	if err := atomicWrite(active, journal.ActiveBefore); err != nil {
+		return fmt.Errorf("restore active Compose model during recovery: %w", err)
+	}
+	if err := atomicWrite(previous, journal.PreviousBefore); err != nil {
+		return fmt.Errorf("restore previous Compose model during recovery: %w", err)
+	}
+	if err := atomicWrite(metadata, journal.ManifestBefore); err != nil {
+		return fmt.Errorf("restore Compose history manifest during recovery: %w", err)
+	}
+	if err := os.Remove(journalPath); err != nil {
+		return fmt.Errorf("remove recovered transaction journal %s: %w", journalPath, err)
+	}
+	return nil
 }
 
 func atomicWrite(path string, content []byte) error {
@@ -237,14 +413,21 @@ func atomicWrite(path string, content []byte) error {
 		file.Close()
 		return fmt.Errorf("write temporary file for %s: %w", path, err)
 	}
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("set permissions for %s: %w", path, err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("sync temporary file for %s: %w", path, err)
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close temporary file for %s: %w", path, err)
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		return fmt.Errorf("set permissions for %s: %w", path, err)
-	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync directory for %s: %w", path, err)
 	}
 	return nil
 }

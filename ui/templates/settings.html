@@ -4,7 +4,7 @@
 <form method="post" action="/settings" class="stackform" id="global-settings">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <section class="card">
-    <h2>Globální nastavení <small>/etc/dkit/dkit.env</small></h2>
+    <h2>Globální nastavení <small>dkit.env</small></h2>
     <div class="formgrid">
     {{range .Data.Fields}}{{$v := index $cfg .Key}}
       {{if eq .Kind "select"}}
@@ -23,7 +23,7 @@
   </section>
   <div class="savebar">
     <button class="primary" name="then" value="">Uložit</button>
-    <button name="then" value="platform">Uložit a restartovat platformu</button>
+    {{if ne .Data.UIEngine "portable"}}<button name="then" value="platform">Uložit a restartovat platformu</button>{{end}}
     <span class="muted">Aplikace převezmou změny po „Použít konfiguraci“ (lze hromadně na přehledu).</span>
   </div>
 </form>
@@ -38,7 +38,7 @@
       {{end}}
       </tbody>
     </table>
-    <form method="post" action="" class="inline-form create-preset" id="create-preset">
+    <form method="post" action="/settings" class="inline-form create-preset" id="create-preset">
       <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="create">
       <input name="name" placeholder="nový-preset" pattern="[a-z][a-z0-9-]{0,30}" required>
       <select name="from">{{range .Data.Presets}}<option value="{{.Name}}">z {{.Name}}</option>{{end}}</select>
@@ -54,8 +54,10 @@
       {{end}}
       </tbody>
     </table>
-    <form method="get" action="" class="inline-form" id="create-template">
+    <form method="post" action="/templates/create" class="inline-form" id="create-template">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
       <input name="name" placeholder="nová-šablona" pattern="[a-z][a-z0-9-]{0,30}" required>
+      <select name="from">{{range .Data.Templates}}<option value="{{.Name}}">z {{.Name}}</option>{{end}}</select>
       <button>Vytvořit</button>
     </form>
   </section>

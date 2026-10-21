@@ -52,6 +52,13 @@ func appComposeRollback(name string, paths portable.Paths, output io.Writer) err
 		return fmt.Errorf("inspect app %q service credentials: %w", name, err)
 	}
 	args = append(args, "--project-name", "dkit-"+name, "--file", modelPath)
+	overridePath, err := composeOverridePath(paths.Config, name)
+	if err != nil {
+		return err
+	}
+	if overridePath != "" {
+		args = append(args, "--file", overridePath)
+	}
 	upArgs := append(append([]string(nil), args...), "up", "--detach", "--no-build", "--remove-orphans", "--wait", "--wait-timeout", "300")
 	if err := runCommand("docker", upArgs...); err != nil {
 		return restoreActiveCompose(name, withComposeFile(activeArgs, activeSnapshot), fmt.Errorf("Compose rollback failed: %w", err))
@@ -61,17 +68,24 @@ func appComposeRollback(name string, paths portable.Paths, output io.Writer) err
 		return restoreActiveCompose(name, withComposeFile(activeArgs, activeSnapshot), fmt.Errorf("verify rollback health: %w", err))
 	}
 	report, healthErr := inspectAppHealth(name, statusOutput)
-	if err := printAppHealth(output, report); err != nil {
-		return err
-	}
+	healthOutputErr := printAppHealth(output, report)
 	if healthErr != nil {
+		if healthOutputErr != nil {
+			healthErr = fmt.Errorf("%w; write health report: %v", healthErr, healthOutputErr)
+		}
 		return restoreActiveCompose(name, withComposeFile(activeArgs, activeSnapshot), fmt.Errorf("rollback target did not pass its HTTP health check: %w", healthErr))
 	}
 	if err := composehistory.PromotePrevious(paths.State, name); err != nil {
 		if writeErr := writeActiveModel(paths.State, name, activeModel); writeErr != nil {
 			return fmt.Errorf("rollback state promotion failed (%v) and the active Compose file could not be restored: %w", err, writeErr)
 		}
+		if healthOutputErr != nil {
+			err = fmt.Errorf("%w; write health report: %v", err, healthOutputErr)
+		}
 		return restoreActiveCompose(name, withComposeFile(activeArgs, activeSnapshot), fmt.Errorf("rollback was healthy but local model state could not be promoted: %w", err))
+	}
+	if healthOutputErr != nil {
+		return healthOutputErr
 	}
 	_, err = fmt.Fprintf(output, "Rolled app %q back to its previous Compose model. This does not switch public traffic, restore database data, or undo migrations.\n", name)
 	return err

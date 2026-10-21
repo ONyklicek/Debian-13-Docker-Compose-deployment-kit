@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,6 +75,8 @@ var globalFields = []Field{
 	{Key: "APP_SUBNET_POOL", Label: "Rozsah privátních sítí aplikací", Help: "Nesmí kolidovat s vaší LAN. Měňte jen před první aplikací.", Kind: "text"},
 	{Key: "APP_SUBNET_PREFIX", Label: "Velikost sítě aplikace (prefix)", Kind: "text"},
 	{Key: "UI_DOMAIN", Label: "Veřejná doména web UI", Help: "Prázdné = jen přes SSH tunel (doporučeno).", Kind: "text"},
+	{Key: "DKIT_UI_ENGINE", Label: "Engine web UI", Help: "legacy = plná Debian/Bash správa; portable = Go CLI pro aplikace s per-app hromadnými úlohami, bez správy platformy.", Kind: "select", Options: []string{"legacy", "portable"}},
+	{Key: "DKIT_BIN", Label: "Cesta k CLI pro web UI", Help: "Portable režim: /usr/local/bin/dkit-go. Výchozí legacy cesta zůstává /opt/dkit/bin/dkit.", Kind: "text"},
 	{Key: "HSTS_SECONDS", Label: "HSTS (s)", Kind: "text"},
 	{Key: "TRAEFIK_IMAGE", Label: "Traefik image", Kind: "text"},
 	{Key: "MARIADB_IMAGE", Label: "MariaDB image", Kind: "text"},
@@ -113,12 +116,16 @@ type Preset struct {
 	Local       bool   `json:"local"`
 }
 
-func listPresets() []Preset {
+func listPresets() ([]Preset, error) {
 	var p []Preset
-	if out, err := runDkit(30*time.Second, "preset", "list", "--json"); err == nil {
-		_ = json.Unmarshal(out, &p)
+	out, err := runDkit(30*time.Second, "preset", "list", "--json")
+	if err != nil {
+		return nil, err
 	}
-	return p
+	if err := json.Unmarshal(out, &p); err != nil {
+		return nil, fmt.Errorf("parse preset list from dkit: %w", err)
+	}
+	return p, nil
 }
 
 type Template struct {
@@ -126,20 +133,28 @@ type Template struct {
 	Local bool   `json:"local"`
 }
 
-func listTemplates() []Template {
+func listTemplates() ([]Template, error) {
 	var t []Template
-	if out, err := runDkit(30*time.Second, "template", "list", "--json"); err == nil {
-		_ = json.Unmarshal(out, &t)
+	out, err := runDkit(30*time.Second, "template", "list", "--json")
+	if err != nil {
+		return nil, err
 	}
-	return t
+	if err := json.Unmarshal(out, &t); err != nil {
+		return nil, fmt.Errorf("parse template list from dkit: %w", err)
+	}
+	return t, nil
 }
 
-func buildOptions() []string {
+func buildOptions() ([]string, error) {
 	opts := []string{"dockerfile"}
-	for _, t := range listTemplates() {
+	templates, err := listTemplates()
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range templates {
 		opts = append(opts, t.Name)
 	}
-	return opts
+	return opts, nil
 }
 
 func workersOf(cfg map[string]string) []Worker {
@@ -310,6 +325,19 @@ func handleClone(w http.ResponseWriter, r *http.Request) {
 
 func handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		if r.FormValue("op") == "create" {
+			name, from := strings.TrimSpace(r.FormValue("name")), strings.TrimSpace(r.FormValue("from"))
+			if !presetRe.MatchString(name) || !presetRe.MatchString(from) {
+				redirect(w, r, "/settings?err="+urlq("Neplatné jméno presetu nebo zdroje."))
+				return
+			}
+			if out, err := runDkit(time.Minute, "preset", "create", name, "--from", from); err != nil {
+				redirect(w, r, "/settings?err="+urlq(err.Error()+" "+string(out)))
+				return
+			}
+			redirect(w, r, "/presets/"+name+"?ok="+urlq("Vlastní preset vytvořen."))
+			return
+		}
 		var lines []string
 		for _, f := range globalFields {
 			v := formValue(r, f)
@@ -324,6 +352,10 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.FormValue("then") == "platform" {
+			if portableUI() {
+				redirect(w, r, "/settings?err="+urlq("Změna byla uložena, ale restart platformy není dostupný v portable UI."))
+				return
+			}
 			if id, err := jobs.start("", "Restart platformy", "platform", "up"); err == nil {
 				redirect(w, r, "/jobs/"+id)
 				return
@@ -333,11 +365,17 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg, err := getJSONMap("config", "get", "--json")
+	presets, presetErr := listPresets()
+	templates, templateErr := listTemplates()
 	p := page{Title: "Nastavení", Section: "settings", Data: map[string]any{
-		"Fields": globalFields, "Config": cfg, "Presets": listPresets(), "Templates": listTemplates(),
+		"Fields": globalFields, "Config": cfg, "Presets": presets, "Templates": templates, "UIEngine": uiEngine,
 	}}
 	if err != nil {
 		p.Error = err.Error()
+	} else if presetErr != nil {
+		p.Error = presetErr.Error()
+	} else if templateErr != nil {
+		p.Error = templateErr.Error()
 	}
 	render(w, r, "settings.html", p)
 }
@@ -345,6 +383,19 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 // ---------- presets and templates (plain files in /etc/dkit) ----------
 
 func presetPath(name, file string) string { return filepath.Join(dkitEtc, "presets", name, file) }
+
+type presetDocument struct {
+	Name   string `json:"name"`
+	Local  bool   `json:"local"`
+	AppEnv string `json:"app_env"`
+	Env    string `json:"env"`
+}
+
+type templateDocument struct {
+	Name    string `json:"name"`
+	Local   bool   `json:"local"`
+	Content string `json:"content"`
+}
 
 func handlePreset(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
@@ -392,10 +443,30 @@ func handlePreset(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/presets/"+name)
 		return
 	}
+	if portableUI() {
+		out, err := runDkit(30*time.Second, "preset", "show", name, "--json")
+		if err != nil {
+			render(w, r, "error.html", page{Title: "Preset " + name, Error: err.Error()})
+			return
+		}
+		var document presetDocument
+		if err := json.Unmarshal(out, &document); err != nil {
+			render(w, r, "error.html", page{Title: "Preset " + name, Error: "Neplatná odpověď CLI: " + err.Error()})
+			return
+		}
+		render(w, r, "preset.html", page{Title: "Preset " + name, Section: "settings", Data: map[string]any{
+			"Name": name, "Local": document.Local, "AppEnv": document.AppEnv, "Env": document.Env,
+		}})
+		return
+	}
 	appEnv, err := os.ReadFile(presetPath(name, "app.env"))
 	local := err == nil
 	if !local {
-		appEnv, _ = os.ReadFile(filepath.Join(dkitRoot, "presets", name, "app.env"))
+		appEnv, err = os.ReadFile(filepath.Join(dkitRoot, "presets", name, "app.env"))
+		if err != nil {
+			render(w, r, "error.html", page{Title: "Preset " + name, Error: err.Error()})
+			return
+		}
 	}
 	envB, _ := os.ReadFile(presetPath(name, "env"))
 	if !local {
@@ -439,12 +510,45 @@ func handleTemplate(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/templates/"+name+"?ok="+urlq("Uloženo jako vlastní šablona; použije se při dalším deployi."))
 		return
 	}
+	if portableUI() {
+		out, err := runDkit(30*time.Second, "template", "show", name, "--json")
+		if err != nil {
+			render(w, r, "error.html", page{Title: "Šablona " + name, Error: err.Error()})
+			return
+		}
+		var document templateDocument
+		if err := json.Unmarshal(out, &document); err != nil {
+			render(w, r, "error.html", page{Title: "Šablona " + name, Error: "Neplatná odpověď CLI: " + err.Error()})
+			return
+		}
+		render(w, r, "template.html", page{Title: "Šablona " + name, Section: "settings", Data: map[string]any{
+			"Name": name, "Local": document.Local, "Content": document.Content,
+		}})
+		return
+	}
 	content, err := os.ReadFile(localFile)
 	local := err == nil
 	if !local {
-		content, _ = os.ReadFile(filepath.Join(dkitRoot, "templates", name, "Dockerfile"))
+		content, err = os.ReadFile(filepath.Join(dkitRoot, "templates", name, "Dockerfile"))
+		if err != nil {
+			render(w, r, "error.html", page{Title: "Šablona " + name, Error: err.Error()})
+			return
+		}
 	}
 	render(w, r, "template.html", page{Title: "Šablona " + name, Section: "settings", Data: map[string]any{
 		"Name": name, "Local": local, "Content": string(content),
 	}})
+}
+
+func handleTemplateCreate(w http.ResponseWriter, r *http.Request) {
+	name, from := strings.TrimSpace(r.FormValue("name")), strings.TrimSpace(r.FormValue("from"))
+	if !presetRe.MatchString(name) || !presetRe.MatchString(from) {
+		redirect(w, r, "/settings?err="+urlq("Neplatné jméno šablony nebo zdroje."))
+		return
+	}
+	if out, err := runDkit(time.Minute, "template", "create", name, "--from", from); err != nil {
+		redirect(w, r, "/settings?err="+urlq(err.Error()+" "+string(out)))
+		return
+	}
+	redirect(w, r, "/templates/"+name+"?ok="+urlq("Vlastní šablona vytvořena."))
 }

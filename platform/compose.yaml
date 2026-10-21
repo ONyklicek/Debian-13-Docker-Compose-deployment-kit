@@ -12,6 +12,10 @@ services:
       - --global.sendAnonymousUsage=false
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
+      - --providers.docker=true
+      - --providers.docker.endpoint=tcp://docker-socket-proxy:2375
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=dkit_edge
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
@@ -36,7 +40,8 @@ services:
     volumes:
       - ${DKIT_STATE:-/var/lib/dkit}/traefik/dynamic:/etc/traefik/dynamic:ro
       - traefik_acme:/letsencrypt
-    networks: [edge]
+    depends_on: [docker-socket-proxy]
+    networks: [edge, control]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
@@ -47,11 +52,31 @@ services:
       timeout: 5s
       retries: 6
 
+  # Traefik needs container metadata/events to discover opted-in app labels.
+  # POST=0 makes the Docker API read-only; the proxy is reachable only on control.
+  docker-socket-proxy:
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:v0.5.0}
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      EVENTS: "1"
+      PING: "1"
+      VERSION: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [control]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "5"}}
+
   # Web UI. It controls Docker and therefore has root-equivalent power over the host:
   # keep it on loopback (SSH tunnel) unless UI_DOMAIN is deliberately set.
   ui:
     image: dkit-ui:local
-    build: ${DKIT_ROOT:-/opt/dkit}/ui
+    build:
+      context: ${DKIT_ROOT:-/opt/dkit}
+      dockerfile: ui/Dockerfile
     container_name: dkit-ui
     profiles: ["ui"]
     restart: unless-stopped
@@ -60,6 +85,8 @@ services:
       DKIT_ROOT: ${DKIT_ROOT:-/opt/dkit}
       DKIT_ETC: ${DKIT_ETC:-/etc/dkit}
       DKIT_STATE: ${DKIT_STATE:-/var/lib/dkit}
+      DKIT_UI_ENGINE: ${DKIT_UI_ENGINE:-legacy}
+      DKIT_BIN: ${DKIT_BIN:-/opt/dkit/bin/dkit}
       DKIT_HOSTNAME: ${DKIT_HOSTNAME:-dkit}
       TZ: ${TZ:-Europe/Prague}
     ports:
@@ -134,6 +161,9 @@ services:
 networks:
   edge:
     name: dkit_edge
+  control:
+    name: dkit_control
+    internal: true
   services:
     name: dkit_services
     internal: true

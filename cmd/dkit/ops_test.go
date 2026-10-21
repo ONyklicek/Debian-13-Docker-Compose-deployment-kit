@@ -82,6 +82,24 @@ func TestExecCommandUsesSelectedServiceAndArgv(t *testing.T) {
 	}
 }
 
+func TestComposeProjectArgsIncludeRegularOverride(t *testing.T) {
+	t.Setenv("DOCKER_CONTEXT", "default")
+	paths, composePath := testRenderedApp(t, "")
+	override := filepath.Join(paths.Config, "apps", "demo", "compose.override.yaml")
+	if err := os.WriteFile(override, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args, err := appComposeProjectArgs("demo", paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--context", "default", "compose", "--project-name", "dkit-demo",
+		"--file", composePath, "--file", override}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("Compose args = %#v, want %#v", args, want)
+	}
+}
+
 func TestLogsAndExecRejectUnknownService(t *testing.T) {
 	paths, _ := testRenderedApp(t, "")
 	if err := logsCommand([]string{"demo", "missing"}, paths); err == nil {

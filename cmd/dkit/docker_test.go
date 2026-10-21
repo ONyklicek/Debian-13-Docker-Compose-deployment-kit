@@ -29,6 +29,14 @@ func TestMain(m *testing.M) {
 }
 
 func runDockerHelper(args []string) int {
+	if containsSequence(args, []string{"up"}) {
+		path := os.Getenv("DKIT_TEST_DOCKER_MUTATE_ON_UP_PATH")
+		if path != "" {
+			if err := os.WriteFile(path, []byte(os.Getenv("DKIT_TEST_DOCKER_MUTATE_ON_UP_CONTENT")), 0o600); err != nil {
+				return 1
+			}
+		}
+	}
 	if capture := os.Getenv("DKIT_TEST_DOCKER_BUILD_CAPTURE"); capture != "" {
 		result := struct {
 			Args         []string `json:"args"`
@@ -86,6 +94,12 @@ func runDockerHelper(args []string) int {
 		)
 	} else if containsSequence(args, []string{"context", "show"}) {
 		_, _ = os.Stdout.WriteString("default\n")
+	} else if containsSequence(args, []string{"image", "inspect"}) {
+		imageID := os.Getenv("DKIT_TEST_DOCKER_IMAGE_ID")
+		if imageID == "" {
+			imageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		}
+		_, _ = os.Stdout.WriteString(imageID + "\n")
 	} else if containsSequence(args, []string{"ps", "--all", "--format", "json"}) {
 		_, _ = os.Stdout.WriteString(os.Getenv("DKIT_TEST_DOCKER_COMPOSE_PS"))
 	} else if containsSequence(args, []string{"volume", "ls"}) {
