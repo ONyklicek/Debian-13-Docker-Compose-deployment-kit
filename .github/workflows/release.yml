@@ -71,22 +71,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Verify tag matches version
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          version="$(cat VERSION)"
-          test "$RELEASE_TAG" = "v$version" || {
-            echo "Tag $RELEASE_TAG does not match VERSION ($version)" >&2
-            exit 1
-          }
       - name: Build and package portable CLI
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           set -eu
-          version="$(cat VERSION)"
+          version="${GITHUB_REF_NAME#v}"
           target="dkit-${GOOS}-${GOARCH}"
           binary="${target}${{ matrix.extension }}"
           mkdir -p dist
